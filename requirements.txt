@@ -3,6 +3,9 @@ uvicorn[standard]>=0.29.0
 pydantic>=2.7.0
 pydantic-settings>=2.2.0
 
+# LLM provider
+openai>=1.30.0
+
 # Testing
 pytest>=8.0.0
 httpx2>=0.28.0         # Required by FastAPI TestClient (starlette now requires httpx2)
