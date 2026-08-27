@@ -17,7 +17,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first two stages: meeting ingestion/retrieval, and evidence-backed information extraction.
+**Today's implementation** covers the first three stages: meeting ingestion/retrieval, evidence-backed information extraction, and the Entity Resolution Foundation (canonical entity registry + mention tracking).
 
 ---
 
@@ -49,6 +49,53 @@ Every extracted item includes **supporting evidence** — the verbatim transcrip
 - Use `null` for optional fields (owner, deadline, severity) when not explicitly mentioned.
 - Preserve conditional language (e.g. "if the issue is not resolved").
 - Prefer no extraction over a hallucinated one.
+
+---
+
+## Entity Resolution
+
+The entity resolution system separates **observed references** (mentions) from **canonical organisational objects** (entities).
+
+It answers: **"Who or what is this transcript actually referring to?"**
+
+### The core distinction
+
+```
+Mention                   Canonical Entity
+───────                   ────────────────
+"Rahul"         ──────►   PERSON · Rahul Kumar
+"Rahul Kumar"   ──────►   PERSON · Rahul Kumar
+"R. Kumar"      ──────►   PERSON · Rahul Kumar
+
+"the backend lead"        (no match → UNRESOLVED)
+```
+
+### Entity types
+
+| Type | Description |
+|---|---|
+| **PERSON** | An individual referenced in meeting transcripts |
+| **ISSUE** | A specific problem or blocker being tracked |
+
+Additional types (TEAM, PROJECT, SYSTEM, INITIATIVE) are planned for future iterations.
+
+### Resolution policy (today)
+
+Resolution is **deliberately conservative** — exact match only.
+
+A mention resolves to a canonical entity if and only if its text matches (case-insensitively, after whitespace normalisation) the entity's canonical name or one of its aliases, within the same entity type.
+
+| Mention text | Canonical entity | Result |
+|---|---|---|
+| `"Rahul Kumar"` | PERSON · "Rahul Kumar" | ✅ RESOLVED |
+| `"  RAHUL  KUMAR  "` | PERSON · "Rahul Kumar" | ✅ RESOLVED (normalised) |
+| `"Rahul"` (alias added) | PERSON · "Rahul Kumar" | ✅ RESOLVED |
+| `"Rahul"` (no alias) | PERSON · "Rahul Kumar" | ❌ UNRESOLVED |
+| `"the backend lead"` | *(any)* | ❌ UNRESOLVED |
+
+Unresolved mentions are stored with `entity_id: null`. A new entity is **never** automatically created for an unresolved mention — that would risk incorrect merges.
+
+Fuzzy matching, embeddings, and LLM-based resolution are explicitly out of scope for the current version and will be introduced incrementally.
 
 ---
 
@@ -234,11 +281,103 @@ curl -X POST http://localhost:8000/api/v1/meetings/3f2e1d0c-.../extract
 
 ---
 
+### `POST /api/v1/entities` — Create a canonical entity
+
+```bash
+curl -X POST http://localhost:8000/api/v1/entities \
+  -H "Content-Type: application/json" \
+  -d '{"entity_type": "PERSON", "canonical_name": "Rahul Kumar"}'
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "entity_id": "e1a2b3c4-...",
+  "entity_type": "PERSON",
+  "canonical_name": "rahul kumar",
+  "aliases": [],
+  "created_at": "2026-08-23T17:40:00Z"
+}
+```
+
+If an entity of the same type with the same name already exists, the existing entity is returned (not a duplicate).
+
+---
+
+### `GET /api/v1/entities` — List entities
+
+```bash
+# All entities
+curl http://localhost:8000/api/v1/entities
+
+# Filter by type
+curl "http://localhost:8000/api/v1/entities?entity_type=PERSON"
+```
+
+---
+
+### `GET /api/v1/entities/{entity_id}` — Retrieve an entity
+
+```bash
+curl http://localhost:8000/api/v1/entities/e1a2b3c4-...
+```
+
+Returns `404 Not Found` if the entity does not exist.
+
+---
+
+### `POST /api/v1/entities/mentions` — Register a mention
+
+Register an observed reference from a transcript and attempt exact-match resolution.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/entities/mentions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "entity_type": "PERSON",
+    "text": "Rahul Kumar",
+    "meeting_id": "3f2e1d0c-...",
+    "source_text": "Rahul Kumar reported the API issue."
+  }'
+```
+
+**Response — RESOLVED (201 Created):**
+
+```json
+{
+  "mention_id": "m1a2b3c4-...",
+  "text": "Rahul Kumar",
+  "entity_type": "PERSON",
+  "entity_id": "e1a2b3c4-...",
+  "resolution_status": "RESOLVED",
+  "created_at": "2026-08-23T17:41:00Z"
+}
+```
+
+**Response — UNRESOLVED (201 Created):**
+
+```json
+{
+  "mention_id": "m9z8y7x6-...",
+  "text": "the backend lead",
+  "entity_type": "PERSON",
+  "entity_id": null,
+  "resolution_status": "UNRESOLVED",
+  "created_at": "2026-08-23T17:41:01Z"
+}
+```
+
+---
+
 ## Running Tests
 
 ```bash
 # Run all tests (no LLM key required — extraction tests use a fake provider)
 pytest tests/ -v
+
+# Run only entity resolution tests
+pytest tests/test_entities.py -v
 
 # Run only extraction tests
 pytest tests/test_extraction.py -v
@@ -246,6 +385,8 @@ pytest tests/test_extraction.py -v
 # Run only meeting ingestion tests
 pytest tests/test_meetings.py -v
 ```
+
+All tests are fully deterministic — no LLM calls, no network access, no database required.
 
 ---
 
@@ -255,19 +396,25 @@ pytest tests/test_meetings.py -v
 app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
-│   └── meetings.py                      # HTTP routing for meetings + extraction
+│   ├── meetings.py                      # HTTP routing for meetings + extraction
+│   └── entities.py                      # HTTP routing for entity registry + mentions
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
-│   └── extraction.py                    # Internal extraction domain models
+│   ├── extraction.py                    # Internal extraction domain models
+│   └── entity.py                        # CanonicalEntity, EntityMention, EntityType, ResolutionStatus
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
-│   └── extraction.py                    # Extraction API response schema
+│   ├── extraction.py                    # Extraction API response schema
+│   └── entity.py                        # Entity registry API schemas
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
-│   └── extraction_service.py            # Extraction orchestration
+│   ├── extraction_service.py            # Extraction orchestration
+│   └── entity_service.py               # Entity creation + mention registration
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
-│   └── extraction_repository.py         # Extraction result storage abstraction
+│   ├── extraction_repository.py         # Extraction result storage abstraction
+│   ├── entity_repository.py             # Canonical entity storage + exact-match lookup
+│   └── mention_repository.py            # Entity mention storage abstraction
 ├── extraction/
 │   ├── base.py                          # AbstractExtractionProvider interface
 │   ├── prompts.py                       # Extraction prompt template
@@ -278,7 +425,8 @@ app/
 
 tests/
 ├── test_meetings.py                     # Meeting ingestion/retrieval tests
-└── test_extraction.py                   # Extraction pipeline tests
+├── test_extraction.py                   # Extraction pipeline tests
+└── test_entities.py                     # Entity registry + mention resolution tests
 ```
 
 ---
@@ -287,9 +435,11 @@ tests/
 
 - **Separation of concerns:** `API → Service → Repository → Storage`. No layer leaks into another.
 - **Provider abstraction:** `AbstractExtractionProvider` defines the LLM interface. Swap to Gemini, Anthropic, or a local model by implementing one class and updating one env var.
-- **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls.
-- **Repository abstraction:** `AbstractMeetingRepository` and `AbstractExtractionRepository` define storage contracts. Swap in PostgreSQL by implementing the same interfaces — service layers do not change.
+- **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls. Entity tests use isolated in-memory repositories via FastAPI dependency overrides.
+- **Repository abstraction:** All repositories (`AbstractMeetingRepository`, `AbstractExtractionRepository`, `AbstractEntityRepository`, `AbstractMentionRepository`) define storage contracts. Swap in PostgreSQL by implementing the same interfaces — service layers do not change.
 - **Domain model vs API schema:** Internal models (`app/models/`) evolve freely; public schemas (`app/schemas/`) remain the stable API contract.
-- **Error hierarchy:** `ExtractionProviderNotConfiguredError` → 503, `ExtractionProviderResponseError` → 502, `ExtractionError` → 503. All mapped explicitly in the router.
+- **Error hierarchy:** `ExtractionProviderNotConfiguredError` → 503, `ExtractionProviderResponseError` → 502, `ExtractionError` → 503, `EntityNotFoundError` → 404. All mapped explicitly in their respective routers.
+- **Normalisation contract:** The `_normalize()` function (strip, collapse spaces, lowercase) is defined once in `entity_repository.py` and imported by `entity_service.py`. The service and repository always agree on what constitutes an exact match.
+- **Unresolved mentions are first-class:** `entity_id: null` on a mention is a meaningful data state, not an error. The system never auto-creates an entity for an unresolved mention.
 - **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.
 
