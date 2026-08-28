@@ -12,12 +12,13 @@ The long-term intelligence pipeline is:
 
 ```
 Meeting Ingestion → Information Extraction → Entity Resolution
+    → Candidate Generation → Candidate Scoring → Resolution Decision
     → Cross-Meeting Correlation → Temporal State Engine
     → Organisational Memory → Retrieval & AI Reasoning
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first three stages: meeting ingestion/retrieval, evidence-backed information extraction, and the Entity Resolution Foundation (canonical entity registry + mention tracking).
+**Today's implementation** covers the first four stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), and Candidate Generation (lexical shortlisting of candidate entities for unresolved mentions).
 
 ---
 
@@ -96,6 +97,97 @@ A mention resolves to a canonical entity if and only if its text matches (case-i
 Unresolved mentions are stored with `entity_id: null`. A new entity is **never** automatically created for an unresolved mention — that would risk incorrect merges.
 
 Fuzzy matching, embeddings, and LLM-based resolution are explicitly out of scope for the current version and will be introduced incrementally.
+
+---
+
+## Candidate Generation
+
+Candidate generation is the **next stage** after exact-match resolution.
+
+It answers: **"Given an unresolved mention, which canonical entities are plausible candidates worth evaluating later?"**
+
+This is deliberately **not** final entity resolution.  Its job is high-recall triage, not a decision.
+
+### Why separate from exact-match resolution?
+
+Exact-match resolution is binary — a mention either matches a canonical entity precisely or it doesn't.  Many real mentions ("Rahul", "payment API") are ambiguous or abbreviated; they won't exact-match but they're not meaningless.
+
+Candidate generation bridges the gap by surfacing a **shortlist** of entities worth evaluating.  A future scoring stage will decide which (if any) is the correct match.
+
+### Why prioritise recall over precision?
+
+It is acceptable to include a candidate that turns out to be wrong.  It is **not** acceptable to exclude the correct entity from the shortlist — that would make correct resolution impossible downstream.
+
+A candidate is not a prediction.  It is a suggestion.
+
+### Today's implementation — lexical token overlap
+
+```
+"Rahul"
+    ↓
+Candidate Generation (token overlap)
+    ↓
+["Rahul Kumar", "Rahul Sharma"]
+    ↓
+No decision yet — awaiting future scoring stage
+```
+
+**Algorithm:**
+
+1. **Normalize** the mention text (strip, lowercase, collapse whitespace).
+2. **Tokenize** into a set of words; single-character tokens are excluded.
+3. For each entity of the **same type**, compute the overlap between mention tokens and the entity's canonical_name + aliases tokens.
+4. Entities with overlap ≥ 1 become candidates.
+5. **Order** by: most overlapping tokens first → alphabetical name → entity_id.
+
+**Invariants (always hold):**
+
+- Candidate generation **never** resolves a mention (never assigns `entity_id`).
+- Candidate generation **never** changes `resolution_status`.
+- Candidate generation only compares entities of the **same entity type**.
+- Results are always **deterministic** — same inputs → same ordered output.
+- Candidate generation is **read-only** with respect to resolution state.
+
+### Calling the candidates endpoint
+
+```bash
+curl http://localhost:8000/api/v1/entities/mentions/{mention_id}/candidates
+```
+
+**Response — UNRESOLVED mention with candidates:**
+
+```json
+{
+  "mention_id": "m_001",
+  "resolution_status": "UNRESOLVED",
+  "candidates": [
+    {
+      "entity_id": "entity_001",
+      "entity_type": "PERSON",
+      "canonical_name": "rahul kumar",
+      "candidate_reason": "lexical_token_overlap"
+    },
+    {
+      "entity_id": "entity_002",
+      "entity_type": "PERSON",
+      "canonical_name": "rahul sharma",
+      "candidate_reason": "lexical_token_overlap"
+    }
+  ]
+}
+```
+
+**Response — RESOLVED mention (empty list):**
+
+```json
+{
+  "mention_id": "m_002",
+  "resolution_status": "RESOLVED",
+  "candidates": []
+}
+```
+
+`404` is returned if the mention does not exist.
 
 ---
 
@@ -368,9 +460,35 @@ curl -X POST http://localhost:8000/api/v1/entities/mentions \
 }
 ```
 
+### `GET /api/v1/entities/mentions/{mention_id}/candidates` — Candidate generation
+
+Return an ordered list of candidate canonical entities for an unresolved mention.
+
+```bash
+curl http://localhost:8000/api/v1/entities/mentions/m_001.../candidates
+```
+
+**Response (200 OK — unresolved mention with candidates):**
+
+```json
+{
+  "mention_id": "m_001",
+  "resolution_status": "UNRESOLVED",
+  "candidates": [
+    {
+      "entity_id": "entity_001",
+      "entity_type": "PERSON",
+      "canonical_name": "rahul kumar",
+      "candidate_reason": "lexical_token_overlap"
+    }
+  ]
+}
+```
+
+Always returns `200`.  Returns `404` only if the mention does not exist.
+
 ---
 
-## Running Tests
 
 ```bash
 # Run all tests (no LLM key required — extraction tests use a fake provider)
@@ -397,19 +515,20 @@ app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
 │   ├── meetings.py                      # HTTP routing for meetings + extraction
-│   └── entities.py                      # HTTP routing for entity registry + mentions
+│   └── entities.py                      # HTTP routing for entity registry + mentions + candidates
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
 │   ├── extraction.py                    # Internal extraction domain models
-│   └── entity.py                        # CanonicalEntity, EntityMention, EntityType, ResolutionStatus
+│   └── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate, EntityType, ResolutionStatus
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
-│   └── entity.py                        # Entity registry API schemas
+│   └── entity.py                        # Entity registry + candidate API schemas
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
-│   └── entity_service.py               # Entity creation + mention registration
+│   ├── entity_service.py               # Entity creation + mention registration
+│   └── candidate_service.py            # Candidate generation orchestration
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -420,13 +539,17 @@ app/
 │   ├── prompts.py                       # Extraction prompt template
 │   ├── openai_provider.py               # OpenAI GPT-4o implementation
 │   └── fake_provider.py                 # Deterministic test double
+├── entity_resolution/
+│   ├── base.py                          # AbstractCandidateGenerator interface
+│   └── lexical_candidate_generator.py   # Token-overlap implementation
 └── core/
     └── config.py                        # Application settings
 
 tests/
 ├── test_meetings.py                     # Meeting ingestion/retrieval tests
 ├── test_extraction.py                   # Extraction pipeline tests
-└── test_entities.py                     # Entity registry + mention resolution tests
+├── test_entities.py                     # Entity registry + mention resolution tests
+└── test_candidates.py                   # Candidate generation tests
 ```
 
 ---
@@ -435,11 +558,13 @@ tests/
 
 - **Separation of concerns:** `API → Service → Repository → Storage`. No layer leaks into another.
 - **Provider abstraction:** `AbstractExtractionProvider` defines the LLM interface. Swap to Gemini, Anthropic, or a local model by implementing one class and updating one env var.
-- **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls. Entity tests use isolated in-memory repositories via FastAPI dependency overrides.
+- **Generator abstraction:** `AbstractCandidateGenerator` defines the candidate generation interface. Swap `LexicalCandidateGenerator` for an embedding-based or contextual generator without changing the service layer.
+- **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls. Entity and candidate tests use isolated in-memory repositories via FastAPI dependency overrides.
 - **Repository abstraction:** All repositories (`AbstractMeetingRepository`, `AbstractExtractionRepository`, `AbstractEntityRepository`, `AbstractMentionRepository`) define storage contracts. Swap in PostgreSQL by implementing the same interfaces — service layers do not change.
 - **Domain model vs API schema:** Internal models (`app/models/`) evolve freely; public schemas (`app/schemas/`) remain the stable API contract.
-- **Error hierarchy:** `ExtractionProviderNotConfiguredError` → 503, `ExtractionProviderResponseError` → 502, `ExtractionError` → 503, `EntityNotFoundError` → 404. All mapped explicitly in their respective routers.
-- **Normalisation contract:** The `_normalize()` function (strip, collapse spaces, lowercase) is defined once in `entity_repository.py` and imported by `entity_service.py`. The service and repository always agree on what constitutes an exact match.
+- **Error hierarchy:** `ExtractionProviderNotConfiguredError` → 503, `ExtractionProviderResponseError` → 502, `ExtractionError` → 503, `EntityNotFoundError` → 404, `MentionNotFoundError` → 404. All mapped explicitly in their respective routers.
+- **Normalisation contract:** The `_normalize()` function (strip, collapse spaces, lowercase) is defined once in `entity_repository.py` and imported by `entity_service.py` and `lexical_candidate_generator.py`. All three layers agree on what constitutes an exact or lexical match.
 - **Unresolved mentions are first-class:** `entity_id: null` on a mention is a meaningful data state, not an error. The system never auto-creates an entity for an unresolved mention.
+- **Candidate generation is read-only:** `CandidateService.get_candidates()` never modifies `resolution_status` or `entity_id`. Candidates are suggestions, not decisions.
 - **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.
 

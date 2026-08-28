@@ -1,16 +1,20 @@
 """Entities API router.
 
 Handles HTTP concerns only: routing, request parsing, response serialisation,
-and HTTP error translation.  All business logic lives in EntityService.
+and HTTP error translation.  All business logic lives in EntityService and
+CandidateService.
 
 Route table
 -----------
-POST   /entities            Create or retrieve a canonical entity
-GET    /entities            List entities (optional ?entity_type= filter)
-GET    /entities/{id}       Retrieve a canonical entity by ID
-POST   /entities/mentions   Register an entity mention (resolved or unresolved)
+POST   /entities                                     Create or retrieve a canonical entity
+GET    /entities                                     List entities (optional ?entity_type= filter)
+GET    /entities/{entity_id}                         Retrieve a canonical entity by ID
+POST   /entities/mentions                            Register an entity mention (resolved or unresolved)
+GET    /entities/mentions/{mention_id}/candidates    Candidate generation for an unresolved mention
 
-IMPORTANT: /entities/mentions must be declared BEFORE /entities/{entity_id}
+Ordering note
+-------------
+All /entities/mentions/* routes must be declared BEFORE /entities/{entity_id}
 so that FastAPI routes the literal path segment "mentions" correctly rather
 than treating it as a dynamic entity_id.
 """
@@ -27,14 +31,18 @@ from app.models.entity import (
 )
 from app.repositories.entity_repository import InMemoryEntityRepository
 from app.repositories.mention_repository import InMemoryMentionRepository
+from app.entity_resolution.lexical_candidate_generator import LexicalCandidateGenerator
 from app.schemas.entity import (
+    CandidatesResponse,
     CreateEntityRequest,
+    EntityCandidateSchema,
     EntityResponse,
     EntityTypeSchema,
     RegisterMentionRequest,
     RegisterMentionResponse,
     ResolutionStatusSchema,
 )
+from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.entity_service import EntityNotFoundError, EntityService
 
 logger = logging.getLogger(__name__)
@@ -58,6 +66,20 @@ def get_entity_service() -> EntityService:
     return EntityService(
         entity_repo=_entity_repository,
         mention_repo=_mention_repository,
+    )
+
+
+def get_candidate_service() -> CandidateService:
+    """FastAPI dependency that provides a configured CandidateService.
+
+    Uses the same shared repository singletons as get_entity_service so
+    both services see the same in-memory state.  The LexicalCandidateGenerator
+    is stateless and can be shared or recreated freely.
+    """
+    return CandidateService(
+        mention_repo=_mention_repository,
+        entity_repo=_entity_repository,
+        generator=LexicalCandidateGenerator(),
     )
 
 
@@ -86,6 +108,29 @@ def _mention_to_response(mention: EntityMention) -> RegisterMentionResponse:
         entity_id=mention.entity_id,
         resolution_status=ResolutionStatusSchema(mention.resolution_status.value),
         created_at=mention.created_at,
+    )
+
+
+def _candidates_to_response(
+    mention: EntityMention,
+    candidates: list,
+) -> CandidatesResponse:
+    """Translate (EntityMention, list[EntityCandidate]) to CandidatesResponse."""
+    from app.models.entity import EntityCandidate  # local import avoids circular at module level
+
+    candidate_schemas = [
+        EntityCandidateSchema(
+            entity_id=c.entity_id,
+            entity_type=EntityTypeSchema(c.entity_type.value),
+            canonical_name=c.canonical_name,
+            candidate_reason=c.candidate_reason,
+        )
+        for c in candidates
+    ]
+    return CandidatesResponse(
+        mention_id=mention.mention_id,
+        resolution_status=ResolutionStatusSchema(mention.resolution_status.value),
+        candidates=candidate_schemas,
     )
 
 
@@ -154,6 +199,37 @@ def create_entity(
     else:
         logger.info("API: returning existing entity %s", entity.entity_id)
     return _entity_to_response(entity)
+
+
+@router.get(
+    "/mentions/{mention_id}/candidates",
+    response_model=CandidatesResponse,
+    summary="Generate candidates for an unresolved mention",
+    description=(
+        "Return an ordered list of canonical entity candidates for an unresolved mention.\n\n"
+        "Candidate generation is NOT final entity resolution — it is a high-recall "
+        "triage step that surfaces entities worth evaluating in a future scoring stage.\n\n"
+        "**If the mention is already RESOLVED**, the response is HTTP 200 with an empty "
+        "candidates list (the mention already has a confirmed identity).\n\n"
+        "**Ordering**: candidates are sorted by descending token-overlap count, then "
+        "alphabetical canonical_name, then entity_id as a stable tie-breaker.\n\n"
+        "This endpoint is read-only: it never modifies the mention's resolution_status "
+        "or entity_id."
+    ),
+)
+def get_mention_candidates(
+    mention_id: str,
+    service: CandidateService = Depends(get_candidate_service),
+) -> CandidatesResponse:
+    """Return candidate entities for the given mention."""
+    try:
+        mention, candidates = service.get_candidates(mention_id)
+    except MentionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _candidates_to_response(mention, candidates)
 
 
 @router.get(

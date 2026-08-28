@@ -173,3 +173,48 @@ class EntityMention(BaseModel):
     created_at: datetime = Field(
         ..., description="UTC timestamp when this mention was registered."
     )
+
+
+# ---------------------------------------------------------------------------
+# Entity Candidate
+# ---------------------------------------------------------------------------
+
+class EntityCandidate(BaseModel):
+    """A plausible canonical entity suggested for an unresolved mention.
+
+    A candidate is NOT a resolution decision.  It is the output of
+    candidate generation — a ranked shortlist of entities worth evaluating
+    in the next pipeline stage (future: candidate scoring).
+
+    Design notes
+    ------------
+    - candidate_reason is a plain str (not an enum) so future generators
+      (embedding-based, contextual) can use their own reason labels without
+      a schema migration.
+    - There is intentionally no confidence_score field.  A candidate is
+      triage output, not a prediction.  Scores belong in the scoring stage.
+    - entity_type is denormalised here so callers never need a second lookup
+      to determine what kind of entity this candidate represents.
+
+    Example
+    -------
+    entity_id: "entity_001"
+    entity_type: PERSON
+    canonical_name: "Rahul Kumar"
+    candidate_reason: "lexical_token_overlap"
+    """
+
+    entity_id: str = Field(..., description="Unique identifier of the candidate entity.")
+    entity_type: EntityType = Field(
+        ..., description="Category of the candidate entity."
+    )
+    canonical_name: str = Field(
+        ..., description="Preferred name of the candidate entity."
+    )
+    candidate_reason: str = Field(
+        ...,
+        description=(
+            "Human-readable label explaining why this entity was selected "
+            "as a candidate.  Set by the generator (e.g. 'lexical_token_overlap')."
+        ),
+    )

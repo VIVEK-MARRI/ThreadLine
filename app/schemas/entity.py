@@ -205,3 +205,103 @@ class RegisterMentionResponse(BaseModel):
             ]
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Candidate generation schemas
+# ---------------------------------------------------------------------------
+
+class EntityCandidateSchema(BaseModel):
+    """A single candidate entity returned by the candidate generation endpoint.
+
+    A candidate is NOT a resolution decision.  It represents one entity that
+    is plausible given the mention's surface form and should be evaluated in
+    a future scoring stage.
+
+    candidate_reason identifies which strategy produced this candidate
+    (e.g. "lexical_token_overlap").  There is intentionally no confidence
+    score — scoring is a future pipeline stage, not part of candidate
+    generation.
+    """
+
+    entity_id: str = Field(..., description="Unique identifier of the candidate entity.")
+    entity_type: EntityTypeSchema = Field(
+        ..., description="Category of the candidate entity."
+    )
+    canonical_name: str = Field(
+        ..., description="Preferred name of the candidate entity."
+    )
+    candidate_reason: str = Field(
+        ...,
+        description=(
+            "Human-readable label explaining why this entity was selected "
+            "as a candidate (e.g. 'lexical_token_overlap')."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "entity_id": "entity_001",
+                    "entity_type": "PERSON",
+                    "canonical_name": "rahul kumar",
+                    "candidate_reason": "lexical_token_overlap",
+                }
+            ]
+        }
+    }
+
+
+class CandidatesResponse(BaseModel):
+    """Response body for GET /entities/mentions/{mention_id}/candidates.
+
+    Always returns HTTP 200 when the mention exists, regardless of resolution
+    status.  When the mention is already RESOLVED, candidates is an empty list
+    — the mention has a confirmed identity and candidate generation is skipped.
+    """
+
+    mention_id: str = Field(..., description="ID of the mention candidates were generated for.")
+    resolution_status: ResolutionStatusSchema = Field(
+        ...,
+        description="Current resolution status of the mention.",
+    )
+    candidates: list[EntityCandidateSchema] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of candidate canonical entities.  "
+            "Empty when the mention is already RESOLVED or no entity has "
+            "meaningful lexical overlap with the mention text."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "mention_id": "m_001",
+                    "resolution_status": "UNRESOLVED",
+                    "candidates": [
+                        {
+                            "entity_id": "entity_001",
+                            "entity_type": "PERSON",
+                            "canonical_name": "rahul kumar",
+                            "candidate_reason": "lexical_token_overlap",
+                        },
+                        {
+                            "entity_id": "entity_002",
+                            "entity_type": "PERSON",
+                            "canonical_name": "rahul sharma",
+                            "candidate_reason": "lexical_token_overlap",
+                        },
+                    ],
+                },
+                {
+                    "mention_id": "m_002",
+                    "resolution_status": "RESOLVED",
+                    "candidates": [],
+                },
+            ]
+        }
+    }
+
