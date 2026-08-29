@@ -64,8 +64,8 @@ CANDIDATE_REASON : str
 import logging
 
 from app.entity_resolution.base import AbstractCandidateGenerator
+from app.entity_resolution.lexical_utils import MIN_TOKEN_LENGTH as MIN_TOKEN_LENGTH, tokenize as _tokenize_impl
 from app.models.entity import CanonicalEntity, EntityCandidate, EntityMention
-from app.repositories.entity_repository import _normalize
 
 logger = logging.getLogger(__name__)
 
@@ -73,25 +73,24 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-MIN_TOKEN_LENGTH: int = 2
-"""Minimum token length (inclusive) to participate in overlap scoring.
-
-Tokens shorter than this are silently discarded.  This prevents fragments
-like "r" (from the alias "R. Kumar") from matching broadly.
-"""
+# MIN_TOKEN_LENGTH is re-exported from lexical_utils (the import above already
+# binds the name at module level, so existing callers can import it from here).
 
 CANDIDATE_REASON: str = "lexical_token_overlap"
 """Reason label attached to every candidate produced by this generator."""
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _tokenize(text: str) -> frozenset[str]:
     """Normalize *text* and return a frozenset of meaningful tokens.
 
-    Tokens shorter than MIN_TOKEN_LENGTH characters are excluded.
+    Delegates to :func:`app.entity_resolution.lexical_utils.tokenize` so the
+    tokenisation contract is shared with the scorer.  This function is kept
+    here (and re-exported) for backward compatibility with existing callers
+    and tests that import it from this module.
 
     Parameters
     ----------
@@ -104,12 +103,7 @@ def _tokenize(text: str) -> frozenset[str]:
         Set of lowercase, meaningful tokens.  Empty set if no token survives
         the length filter (e.g. input is a single-character string).
     """
-    normalized = _normalize(text)
-    return frozenset(
-        token
-        for token in normalized.split()
-        if len(token) >= MIN_TOKEN_LENGTH
-    )
+    return _tokenize_impl(text)
 
 
 def _entity_token_set(entity: CanonicalEntity) -> frozenset[str]:

@@ -305,3 +305,154 @@ class CandidatesResponse(BaseModel):
         }
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Candidate scoring schemas
+# ---------------------------------------------------------------------------
+
+class ScoredEntityCandidateSchema(BaseModel):
+    """A single candidate entity with its lexical similarity score.
+
+    Returned by the scored-candidates endpoint.  Every field is included
+    to keep the API evidence-backed and auditable.
+
+    score is always in [0.0, 1.0]:
+      - 1.0 indicates an exact normalised match.
+      - Lower values indicate partial lexical overlap.
+
+    Component scores (mention_coverage, candidate_coverage) explain how
+    the final score was derived.
+
+    matched_representation identifies which canonical name or alias of the
+    entity produced the best score.
+    """
+
+    entity_id: str = Field(..., description="Unique identifier of the candidate entity.")
+    canonical_name: str = Field(..., description="Preferred name of the candidate entity.")
+    score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Aggregated similarity score in [0.0, 1.0].  "
+            "1.0 = exact normalised match; lower = partial overlap."
+        ),
+    )
+    scoring_method: str = Field(
+        ...,
+        description="Identifier of the scoring algorithm (e.g. 'lexical_weighted_coverage').",
+    )
+    matched_representation: str = Field(
+        ...,
+        description="The canonical name or alias that produced the best score.",
+    )
+    mention_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of mention tokens covered by the overlap "
+            "(overlap / mention_token_count)."
+        ),
+    )
+    candidate_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of matched-representation tokens covered by the overlap "
+            "(overlap / representation_token_count)."
+        ),
+    )
+    exact_match: bool = Field(
+        ...,
+        description=(
+            "True when the normalised mention equals the candidate's "
+            "canonical name or an alias exactly.  Always yields score=1.0."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "entity_id": "entity_001",
+                    "canonical_name": "rahul kumar",
+                    "score": 1.0,
+                    "scoring_method": "lexical_weighted_coverage",
+                    "matched_representation": "rahul kumar",
+                    "mention_coverage": 1.0,
+                    "candidate_coverage": 1.0,
+                    "exact_match": True,
+                },
+                {
+                    "entity_id": "entity_002",
+                    "canonical_name": "rahul sharma",
+                    "score": 0.6,
+                    "scoring_method": "lexical_weighted_coverage",
+                    "matched_representation": "rahul sharma",
+                    "mention_coverage": 1.0,
+                    "candidate_coverage": 0.5,
+                    "exact_match": False,
+                },
+            ]
+        }
+    }
+
+
+class ScoredCandidatesResponse(BaseModel):
+    """Response body for GET /entities/mentions/{mention_id}/scored-candidates.
+
+    Always returns HTTP 200 when the mention exists, regardless of resolution
+    status.  When the mention is already RESOLVED, candidates is an empty list
+    -- the mention has a confirmed identity and scoring is skipped.
+
+    This endpoint is read-only and never modifies the mention.
+    """
+
+    mention_id: str = Field(
+        ..., description="ID of the mention candidates were scored for."
+    )
+    resolution_status: ResolutionStatusSchema = Field(
+        ...,
+        description="Current resolution status of the mention.",
+    )
+    candidates: list[ScoredEntityCandidateSchema] = Field(
+        default_factory=list,
+        description=(
+            "Scored, ordered list of candidate canonical entities.  "
+            "Ordered by score descending, then canonical_name ascending, "
+            "then entity_id ascending.  "
+            "Empty when the mention is already RESOLVED or no entity has "
+            "meaningful lexical overlap with the mention text."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "mention_id": "m_001",
+                    "resolution_status": "UNRESOLVED",
+                    "candidates": [
+                        {
+                            "entity_id": "entity_001",
+                            "canonical_name": "rahul kumar",
+                            "score": 1.0,
+                            "scoring_method": "lexical_weighted_coverage",
+                            "matched_representation": "rahul kumar",
+                            "mention_coverage": 1.0,
+                            "candidate_coverage": 1.0,
+                            "exact_match": True,
+                        }
+                    ],
+                },
+                {
+                    "mention_id": "m_002",
+                    "resolution_status": "RESOLVED",
+                    "candidates": [],
+                },
+            ]
+        }
+    }

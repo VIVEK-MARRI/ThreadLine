@@ -191,6 +191,82 @@ curl http://localhost:8000/api/v1/entities/mentions/{mention_id}/candidates
 
 ---
 
+## Candidate Scoring
+
+Candidate scoring is the **third stage** of entity resolution, operating after Candidate Generation.
+
+It answers: **"Given an unresolved mention and a shortlist of candidate entities, how strong is the lexical evidence for each candidate?"**
+
+This is deliberately **not** final entity resolution. Its job is to evaluate and rank, not to decide.
+
+### Algorithm (Lexical Weighted Coverage)
+
+The lexical scorer evaluates candidates using a deterministic, highly explainable token-overlap formula:
+
+1. **Exact Match Check**: If the normalised mention exactly equals the candidate's canonical name or one of its aliases, `score = 1.0`.
+2. **Component Scores**: Otherwise, it computes token overlap coverage for both the mention and the candidate representation:
+   - `mention_coverage` = matched tokens / total mention tokens
+   - `candidate_coverage` = matched tokens / total candidate tokens
+3. **Combined Score**: `score = 0.6 × mention_coverage + 0.4 × candidate_coverage`.
+4. **Best Representation Wins**: Every alias is scored independently. The best score across the canonical name and all aliases is selected.
+
+### Invariants (always hold):
+
+- Candidate scoring **never** resolves a mention (never assigns `entity_id`).
+- Candidate scoring **never** changes `resolution_status`.
+- Candidate scoring **never** creates canonical entities.
+- It only processes candidates provided by the generation stage.
+- Results are always **deterministic** and **explainable** via component scores.
+
+### Calling the scored candidates endpoint
+
+```bash
+curl http://localhost:8000/api/v1/entities/mentions/{mention_id}/scored-candidates
+```
+
+**Response — UNRESOLVED mention with scored candidates:**
+
+```json
+{
+  "mention_id": "m_001",
+  "resolution_status": "UNRESOLVED",
+  "candidates": [
+    {
+      "entity_id": "entity_001",
+      "canonical_name": "rahul kumar",
+      "score": 1.0,
+      "scoring_method": "lexical_weighted_coverage",
+      "matched_representation": "rahul kumar",
+      "mention_coverage": 1.0,
+      "candidate_coverage": 1.0,
+      "exact_match": true
+    },
+    {
+      "entity_id": "entity_002",
+      "canonical_name": "rahul sharma",
+      "score": 0.6,
+      "scoring_method": "lexical_weighted_coverage",
+      "matched_representation": "rahul sharma",
+      "mention_coverage": 1.0,
+      "candidate_coverage": 0.5,
+      "exact_match": false
+    }
+  ]
+}
+```
+
+**Response — RESOLVED mention (empty list):**
+
+```json
+{
+  "mention_id": "m_002",
+  "resolution_status": "RESOLVED",
+  "candidates": []
+}
+```
+
+---
+
 ## Getting Started
 
 ### 1. Create a virtual environment

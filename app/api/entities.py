@@ -41,8 +41,14 @@ from app.schemas.entity import (
     RegisterMentionRequest,
     RegisterMentionResponse,
     ResolutionStatusSchema,
+    ScoredCandidatesResponse,
+    ScoredEntityCandidateSchema,
 )
 from app.services.candidate_service import CandidateService, MentionNotFoundError
+from app.services.candidate_scoring_service import (
+    CandidateScoringService,
+    MentionNotFoundError as ScoringMentionNotFoundError,
+)
 from app.services.entity_service import EntityNotFoundError, EntityService
 
 logger = logging.getLogger(__name__)
@@ -80,6 +86,23 @@ def get_candidate_service() -> CandidateService:
         mention_repo=_mention_repository,
         entity_repo=_entity_repository,
         generator=LexicalCandidateGenerator(),
+    )
+
+
+def get_candidate_scoring_service() -> CandidateScoringService:
+    """FastAPI dependency that provides a configured CandidateScoringService.
+
+    Uses the same shared repository singletons so all three services see
+    the same in-memory state.  Both the generator and scorer are stateless
+    and can be recreated freely.
+    """
+    from app.entity_resolution.lexical_candidate_scorer import LexicalCandidateScorer
+
+    return CandidateScoringService(
+        mention_repo=_mention_repository,
+        entity_repo=_entity_repository,
+        generator=LexicalCandidateGenerator(),
+        scorer=LexicalCandidateScorer(),
     )
 
 
@@ -131,6 +154,33 @@ def _candidates_to_response(
         mention_id=mention.mention_id,
         resolution_status=ResolutionStatusSchema(mention.resolution_status.value),
         candidates=candidate_schemas,
+    )
+
+
+def _scored_candidates_to_response(
+    mention: EntityMention,
+    scored_candidates: list,
+) -> ScoredCandidatesResponse:
+    """Translate (EntityMention, list[ScoredEntityCandidate]) to ScoredCandidatesResponse."""
+    from app.models.entity import ScoredEntityCandidate  # local import avoids circular at module level
+
+    scored_schemas = [
+        ScoredEntityCandidateSchema(
+            entity_id=sc.entity_id,
+            canonical_name=sc.canonical_name,
+            score=sc.score,
+            scoring_method=sc.scoring_method,
+            matched_representation=sc.matched_representation,
+            mention_coverage=sc.mention_coverage,
+            candidate_coverage=sc.candidate_coverage,
+            exact_match=sc.exact_match,
+        )
+        for sc in scored_candidates
+    ]
+    return ScoredCandidatesResponse(
+        mention_id=mention.mention_id,
+        resolution_status=ResolutionStatusSchema(mention.resolution_status.value),
+        candidates=scored_schemas,
     )
 
 
@@ -230,6 +280,45 @@ def get_mention_candidates(
             detail=str(exc),
         ) from exc
     return _candidates_to_response(mention, candidates)
+
+
+@router.get(
+    "/mentions/{mention_id}/scored-candidates",
+    response_model=ScoredCandidatesResponse,
+    summary="Score candidates for an unresolved mention",
+    description=(
+        "Return a scored, ranked list of canonical entity candidates for an "
+        "unresolved mention.\n\n"
+        "Candidate scoring evaluates **how strong the lexical evidence is** "
+        "for each candidate — it is NOT a resolution decision and never assigns "
+        "an entity to the mention.\n\n"
+        "**Scoring formula** (lexical_weighted_coverage):\n"
+        "- If the normalised mention matches a candidate name or alias exactly "
+        "→ score = 1.0.\n"
+        "- Otherwise: score = 0.6 × mention_coverage + 0.4 × candidate_coverage.\n\n"
+        "**Alias handling**: each alias is scored independently; the best "
+        "representation wins.\n\n"
+        "**If the mention is already RESOLVED**, the response is HTTP 200 with an "
+        "empty candidates list.\n\n"
+        "**Ordering**: score descending, then canonical_name ascending, then "
+        "entity_id ascending.\n\n"
+        "This endpoint is read-only: it never modifies the mention's "
+        "resolution_status or entity_id."
+    ),
+)
+def get_mention_scored_candidates(
+    mention_id: str,
+    service: CandidateScoringService = Depends(get_candidate_scoring_service),
+) -> ScoredCandidatesResponse:
+    """Return scored candidate entities for the given mention."""
+    try:
+        mention, scored = service.get_scored_candidates(mention_id)
+    except ScoringMentionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _scored_candidates_to_response(mention, scored)
 
 
 @router.get(

@@ -218,3 +218,110 @@ class EntityCandidate(BaseModel):
             "as a candidate.  Set by the generator (e.g. 'lexical_token_overlap')."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Scored Entity Candidate
+# ---------------------------------------------------------------------------
+
+class ScoredEntityCandidate(BaseModel):
+    """The result of scoring a single candidate entity against an unresolved mention.
+
+    A scored candidate is NOT a resolution decision.  It is the output of
+    the candidate scoring stage — a ranked, explainable evaluation of how
+    well a candidate matches the mention's surface form.
+
+    Design notes
+    ------------
+    - ``score`` is the final aggregated score, always in [0.0, 1.0].
+    - ``scoring_method`` identifies which scorer produced this result
+      (e.g. ``"lexical_weighted_coverage"``), analogous to
+      ``candidate_reason`` on EntityCandidate.
+    - ``matched_representation`` records which canonical name or alias
+      yielded the best score, enabling explainability without exposing
+      internals.
+    - Component scores (``mention_coverage``, ``candidate_coverage``,
+      ``exact_match``) are exposed so the system remains evidence-backed
+      and auditable.
+    - This model is intentionally separate from EntityCandidate: a
+      candidate is a nomination; a scored candidate is an evaluation.
+
+    Example (partial match)
+    -----------------------
+    entity_id: "entity_001"
+    canonical_name: "Rahul Kumar"
+    score: 0.8
+    scoring_method: "lexical_weighted_coverage"
+    matched_representation: "rahul kumar"
+    mention_coverage: 1.0
+    candidate_coverage: 0.5
+    exact_match: False
+
+    Example (exact match)
+    ---------------------
+    entity_id: "entity_002"
+    canonical_name: "Rahul Kumar"
+    score: 1.0
+    exact_match: True
+    """
+
+    # Identity
+    entity_id: str = Field(..., description="Unique identifier of the candidate entity.")
+    canonical_name: str = Field(..., description="Preferred name of the candidate entity.")
+
+    # Scoring result
+    score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Aggregated similarity score in [0.0, 1.0].  "
+            "1.0 indicates an exact normalised match; "
+            "lower values indicate partial lexical overlap."
+        ),
+    )
+    scoring_method: str = Field(
+        ...,
+        description=(
+            "Identifier for the scoring algorithm that produced this result "
+            "(e.g. 'lexical_weighted_coverage').  Analogous to candidate_reason "
+            "on EntityCandidate."
+        ),
+    )
+
+    # Explainability
+    matched_representation: str = Field(
+        ...,
+        description=(
+            "The canonical_name or alias that yielded the best score.  "
+            "Useful for understanding which representation drove the match."
+        ),
+    )
+    mention_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of meaningful mention tokens covered by the overlap: "
+            "overlap_count / len(mention_tokens).  "
+            "1.0 means every mention token appears in the candidate representation."
+        ),
+    )
+    candidate_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of meaningful candidate representation tokens covered by "
+            "the overlap: overlap_count / len(representation_tokens).  "
+            "1.0 means the representation is fully explained by the mention."
+        ),
+    )
+    exact_match: bool = Field(
+        ...,
+        description=(
+            "True when the normalised mention text exactly equals the "
+            "candidate's canonical_name or one of its aliases.  "
+            "An exact match always yields score=1.0."
+        ),
+    )
