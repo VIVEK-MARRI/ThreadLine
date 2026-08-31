@@ -49,6 +49,19 @@ class AbstractMentionRepository(ABC):
         """Return all mentions that resolved to a specific canonical entity."""
         ...
 
+    @abstractmethod
+    def update(self, mention: EntityMention) -> None:
+        """Persist an updated mention, replacing the existing record.
+
+        The mention_id must already exist in the repository.  If it does not,
+        implementations should raise a KeyError or silently no-op — callers
+        must ensure the mention exists before calling update.
+
+        This method is intentionally minimal: it replaces the entire record
+        rather than supporting partial field updates.  This keeps the
+        repository contract simple and avoids partial-update ambiguity.
+        """
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation
@@ -79,3 +92,11 @@ class InMemoryMentionRepository(AbstractMentionRepository):
     def list_by_entity_id(self, entity_id: str) -> list[EntityMention]:
         """Return all resolved mentions for a specific entity (linear scan)."""
         return [m for m in self._store.values() if m.entity_id == entity_id]
+
+    def update(self, mention: EntityMention) -> None:
+        """Replace the stored mention record with the updated version.
+
+        Silently no-ops if the mention_id is not present (mirrors the
+        permissive in-memory pattern used elsewhere in the codebase).
+        """
+        self._store[mention.mention_id] = mention

@@ -18,7 +18,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first four stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), and Candidate Generation (lexical shortlisting of candidate entities for unresolved mentions).
+**Today's implementation** covers the first five stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), and the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes).
 
 ---
 
@@ -266,6 +266,167 @@ curl http://localhost:8000/api/v1/entities/mentions/{mention_id}/scored-candidat
 ```
 
 ---
+
+## Resolution Decision
+
+The Resolution Decision Engine is **Stage 4** of the entity-resolution pipeline, operating after Candidate Scoring.
+
+It answers: **"Do we have enough evidence to act on the scored candidates?"**
+
+This is the only stage that may assign an `entity_id` to a mention or change its `resolution_status`.  Candidate generation and scoring are read-only.
+
+### The three pipeline questions
+
+| Stage | Question |
+|---|---|
+| Candidate Generation | "Find possibilities." |
+| Candidate Scoring | "Rank possibilities." |
+| Resolution Decision | "Determine whether evidence is sufficient to act." |
+
+### Why a score is NOT a decision
+
+A lexical similarity score of `0.92` means the candidate received a score of 0.92 under the scoring function.  It does **not** mean there is a 92% probability the entity is correct.
+
+The decision engine applies an explicit policy to determine whether the evidence clears a threshold **and** is clearly distinguishable from alternatives.  The highest score does not automatically win — it must also have sufficient margin over the second candidate.
+
+This separation prevents the scoring layer from making uncontrolled resolution decisions.
+
+### The three possible outcomes
+
+| Outcome | Meaning | `entity_id` |
+|---|---|---|
+| **RESOLVED** | Top candidate exceeded the confidence threshold and had sufficient margin. The mention is matched to the entity. | Set to the selected entity |
+| **AMBIGUOUS** | Top candidate exceeded the threshold but was too close to the second candidate.  The system abstains safely. | `null` |
+| **UNRESOLVED** | No candidate exceeded the confidence threshold.  The system abstains safely. | `null` |
+
+### Safe abstention
+
+When the evidence is insufficient, the system abstains rather than guessing.  An incorrect entity assignment creates a misleading organisational memory that is hard to fix.  An unresolved or ambiguous mention is easy to resolve later with more information.
+
+### Decision policy — Threshold + Margin
+
+The engine uses a deterministic threshold + margin policy:
+
+| Case | Condition | Decision |
+|---|---|---|
+| **A** — No candidates | Candidate list is empty | UNRESOLVED |
+| **B** — Below threshold | `top_score < resolution_threshold` | UNRESOLVED |
+| **C** — Ambiguous gap | `top_score ≥ threshold` AND `margin < ambiguity_margin` | AMBIGUOUS |
+| **D** — Clear winner | `top_score ≥ threshold` AND `margin ≥ ambiguity_margin` | RESOLVED |
+
+**Default thresholds:**
+- `resolution_threshold = 0.85`
+- `ambiguity_margin = 0.10`
+
+**Single-candidate rule:** when only one candidate exists, the margin is treated as infinite — if it meets the threshold it always resolves (there is no second candidate to be ambiguous with).
+
+### Decision invariants (always hold)
+
+1. **RESOLVED never becomes UNRESOLVED.**
+2. **RESOLVED never becomes AMBIGUOUS.**
+3. UNRESOLVED may become RESOLVED only via an explicit decision.
+4. AMBIGUOUS mentions always have `entity_id = null`.
+5. UNRESOLVED mentions always have `entity_id = null`.
+6. Resolution **never creates a new canonical entity**.
+7. Resolution only selects an entity that appeared in the scored candidate list.
+8. The decision is **deterministic** — identical inputs always produce identical decisions.
+
+### Example decisions
+
+**Example 1 — RESOLVED:**
+
+```
+Candidate scores:
+  Rahul Kumar  → 0.94
+  Rahul Sharma → 0.40
+
+Margin: 0.94 − 0.40 = 0.54  ≥ ambiguity_margin (0.10)
+Top score: 0.94 ≥ threshold (0.85)
+
+Decision: RESOLVED → entity_id = Rahul Kumar
+Reason:   "Top candidate exceeded the confidence threshold (0.9400 ≥ 0.8500)
+           and had sufficient margin over the second candidate (0.5400 ≥ 0.1000)."
+```
+
+**Example 2 — AMBIGUOUS:**
+
+```
+Candidate scores:
+  Rahul Kumar  → 0.91
+  Rahul Sharma → 0.90
+
+Margin: 0.91 − 0.90 = 0.01  < ambiguity_margin (0.10)
+Top score: 0.91 ≥ threshold (0.85)
+
+Decision: AMBIGUOUS → entity_id = null
+Reason:   "Top candidate exceeded the confidence threshold (0.9100 ≥ 0.8500)
+           but was too close to the second candidate (margin 0.0100 < 0.1000)."
+```
+
+**Example 3 — UNRESOLVED:**
+
+```
+Candidate scores:
+  Rahul Kumar → 0.55
+
+Top score: 0.55 < threshold (0.85)
+
+Decision: UNRESOLVED → entity_id = null
+Reason:   "No candidate exceeded the confidence threshold
+           (top score 0.5500 < threshold 0.8500)."
+```
+
+### Calling the resolution endpoint
+
+```bash
+curl -X POST http://localhost:8000/api/v1/entities/mentions/{mention_id}/resolve
+```
+
+**Response — RESOLVED:**
+
+```json
+{
+  "mention_id": "m_001",
+  "outcome": "RESOLVED",
+  "selected_entity_id": "entity_001",
+  "top_score": 0.94,
+  "second_score": 0.40,
+  "score_margin": 0.54,
+  "reason": "Top candidate exceeded the confidence threshold (0.9400 >= 0.8500) and had sufficient margin over the second candidate (margin 0.5400 >= 0.1000)."
+}
+```
+
+**Response — AMBIGUOUS:**
+
+```json
+{
+  "mention_id": "m_002",
+  "outcome": "AMBIGUOUS",
+  "selected_entity_id": null,
+  "top_score": 0.91,
+  "second_score": 0.90,
+  "score_margin": 0.01,
+  "reason": "Top candidate exceeded the confidence threshold but was too close to the second candidate."
+}
+```
+
+**Response — UNRESOLVED:**
+
+```json
+{
+  "mention_id": "m_003",
+  "outcome": "UNRESOLVED",
+  "selected_entity_id": null,
+  "top_score": 0.55,
+  "second_score": null,
+  "score_margin": null,
+  "reason": "No candidate exceeded the confidence threshold (top score 0.5500 < threshold 0.8500)."
+}
+```
+
+`404` is returned if the mention does not exist.
+
+> **Idempotency:** calling `/resolve` on an already-RESOLVED mention returns the current RESOLVED state without modification.  RESOLVED mentions are never downgraded.
 
 ## Getting Started
 
@@ -565,8 +726,45 @@ Always returns `200`.  Returns `404` only if the mention does not exist.
 
 ---
 
+### `GET /api/v1/entities/mentions/{mention_id}/scored-candidates` — Candidate scoring
+
+Return a scored, ranked list of candidates.  Read-only; never modifies the mention.
 
 ```bash
+curl http://localhost:8000/api/v1/entities/mentions/m_001.../scored-candidates
+```
+
+Always returns `200`.  Returns `404` only if the mention does not exist.
+
+---
+
+### `POST /api/v1/entities/mentions/{mention_id}/resolve` — Resolution Decision
+
+Apply the Resolution Decision Engine to an unresolved mention.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/entities/mentions/m_001.../resolve
+```
+
+**Response (200 OK — RESOLVED):**
+
+```json
+{
+  "mention_id": "m_001",
+  "outcome": "RESOLVED",
+  "selected_entity_id": "entity_001",
+  "top_score": 0.94,
+  "second_score": 0.40,
+  "score_margin": 0.54,
+  "reason": "Top candidate exceeded the confidence threshold..."
+}
+```
+
+Returns `404` if the mention does not exist.
+
+---
+
+```
 # Run all tests (no LLM key required — extraction tests use a fake provider)
 pytest tests/ -v
 
@@ -578,6 +776,9 @@ pytest tests/test_extraction.py -v
 
 # Run only meeting ingestion tests
 pytest tests/test_meetings.py -v
+
+# Run only resolution decision tests
+pytest tests/test_resolution.py -v
 ```
 
 All tests are fully deterministic — no LLM calls, no network access, no database required.
@@ -591,25 +792,29 @@ app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
 │   ├── meetings.py                      # HTTP routing for meetings + extraction
-│   └── entities.py                      # HTTP routing for entity registry + mentions + candidates
+│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
 │   ├── extraction.py                    # Internal extraction domain models
-│   └── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate, EntityType, ResolutionStatus
+│   └── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate,
+│                                        #   ScoredEntityCandidate, ResolutionDecision,
+│                                        #   EntityType, ResolutionStatus, ResolutionOutcome
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
-│   └── entity.py                        # Entity registry + candidate API schemas
+│   └── entity.py                        # Entity, mention, candidate, scoring, decision schemas
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
 │   ├── entity_service.py               # Entity creation + mention registration
-│   └── candidate_service.py            # Candidate generation orchestration
+│   ├── candidate_service.py            # Candidate generation orchestration
+│   ├── candidate_scoring_service.py     # Candidate scoring orchestration
+│   └── resolution_service.py            # Resolution Decision orchestration (Stage 4)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
 │   ├── entity_repository.py             # Canonical entity storage + exact-match lookup
-│   └── mention_repository.py            # Entity mention storage abstraction
+│   └── mention_repository.py            # Entity mention storage (with update() method)
 ├── extraction/
 │   ├── base.py                          # AbstractExtractionProvider interface
 │   ├── prompts.py                       # Extraction prompt template
@@ -617,7 +822,11 @@ app/
 │   └── fake_provider.py                 # Deterministic test double
 ├── entity_resolution/
 │   ├── base.py                          # AbstractCandidateGenerator interface
-│   └── lexical_candidate_generator.py   # Token-overlap implementation
+│   ├── scoring_base.py                  # AbstractCandidateScorer interface
+│   ├── resolution_policy.py             # AbstractResolutionPolicy + ThresholdResolutionPolicy
+│   ├── lexical_candidate_generator.py   # Token-overlap candidate generation
+│   ├── lexical_candidate_scorer.py      # Weighted coverage scoring
+│   └── lexical_utils.py                 # Shared tokenisation utilities
 └── core/
     └── config.py                        # Application settings
 
@@ -625,7 +834,9 @@ tests/
 ├── test_meetings.py                     # Meeting ingestion/retrieval tests
 ├── test_extraction.py                   # Extraction pipeline tests
 ├── test_entities.py                     # Entity registry + mention resolution tests
-└── test_candidates.py                   # Candidate generation tests
+├── test_candidates.py                   # Candidate generation tests
+├── test_scoring.py                      # Candidate scoring tests
+└── test_resolution.py                   # Resolution Decision Engine tests
 ```
 
 ---
@@ -635,6 +846,8 @@ tests/
 - **Separation of concerns:** `API → Service → Repository → Storage`. No layer leaks into another.
 - **Provider abstraction:** `AbstractExtractionProvider` defines the LLM interface. Swap to Gemini, Anthropic, or a local model by implementing one class and updating one env var.
 - **Generator abstraction:** `AbstractCandidateGenerator` defines the candidate generation interface. Swap `LexicalCandidateGenerator` for an embedding-based or contextual generator without changing the service layer.
+- **Scorer abstraction:** `AbstractCandidateScorer` defines the scoring interface. Swap for any scoring implementation without touching services or the API.
+- **Policy abstraction:** `AbstractResolutionPolicy` defines the decision interface. Swap `ThresholdResolutionPolicy` for an ML-based or human-in-the-loop policy without restructuring the resolution service.
 - **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls. Entity and candidate tests use isolated in-memory repositories via FastAPI dependency overrides.
 - **Repository abstraction:** All repositories (`AbstractMeetingRepository`, `AbstractExtractionRepository`, `AbstractEntityRepository`, `AbstractMentionRepository`) define storage contracts. Swap in PostgreSQL by implementing the same interfaces — service layers do not change.
 - **Domain model vs API schema:** Internal models (`app/models/`) evolve freely; public schemas (`app/schemas/`) remain the stable API contract.
@@ -642,5 +855,8 @@ tests/
 - **Normalisation contract:** The `_normalize()` function (strip, collapse spaces, lowercase) is defined once in `entity_repository.py` and imported by `entity_service.py` and `lexical_candidate_generator.py`. All three layers agree on what constitutes an exact or lexical match.
 - **Unresolved mentions are first-class:** `entity_id: null` on a mention is a meaningful data state, not an error. The system never auto-creates an entity for an unresolved mention.
 - **Candidate generation is read-only:** `CandidateService.get_candidates()` never modifies `resolution_status` or `entity_id`. Candidates are suggestions, not decisions.
+- **Scoring is read-only:** `CandidateScoringService.get_scored_candidates()` never modifies any mention or entity. Scores are evidence, not actions.
+- **Resolution Decision is the only mutating stage:** Only `ResolutionService.resolve()` may update a mention's `entity_id` and `resolution_status`. No other stage does this.
+- **Score ≠ probability:** Lexical similarity scores are outputs of the scoring function. They are explicitly documented as non-probabilistic throughout the codebase.
+- **Safe abstention:** The system prefers AMBIGUOUS/UNRESOLVED over incorrect RESOLVED. Incorrect entity assignments are harder to fix than unresolved mentions.
 - **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.
-

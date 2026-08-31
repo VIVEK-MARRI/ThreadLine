@@ -40,6 +40,8 @@ from app.schemas.entity import (
     EntityTypeSchema,
     RegisterMentionRequest,
     RegisterMentionResponse,
+    ResolutionDecisionResponse,
+    ResolutionOutcomeSchema,
     ResolutionStatusSchema,
     ScoredCandidatesResponse,
     ScoredEntityCandidateSchema,
@@ -50,6 +52,10 @@ from app.services.candidate_scoring_service import (
     MentionNotFoundError as ScoringMentionNotFoundError,
 )
 from app.services.entity_service import EntityNotFoundError, EntityService
+from app.services.resolution_service import (
+    ResolutionService,
+    MentionNotFoundError as ResolutionMentionNotFoundError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,30 @@ def get_candidate_scoring_service() -> CandidateScoringService:
         entity_repo=_entity_repository,
         generator=LexicalCandidateGenerator(),
         scorer=LexicalCandidateScorer(),
+    )
+
+
+def get_resolution_service() -> ResolutionService:
+    """FastAPI dependency that provides a configured ResolutionService.
+
+    Uses the same shared repository singletons and a freshly constructed
+    CandidateScoringService + ThresholdResolutionPolicy.  All components
+    are stateless and can be recreated freely.
+    """
+    from app.entity_resolution.lexical_candidate_scorer import LexicalCandidateScorer
+    from app.entity_resolution.resolution_policy import ThresholdResolutionPolicy
+
+    scoring_service = CandidateScoringService(
+        mention_repo=_mention_repository,
+        entity_repo=_entity_repository,
+        generator=LexicalCandidateGenerator(),
+        scorer=LexicalCandidateScorer(),
+    )
+    return ResolutionService(
+        mention_repo=_mention_repository,
+        entity_repo=_entity_repository,
+        scoring_service=scoring_service,
+        policy=ThresholdResolutionPolicy(),
     )
 
 
@@ -181,6 +211,19 @@ def _scored_candidates_to_response(
         mention_id=mention.mention_id,
         resolution_status=ResolutionStatusSchema(mention.resolution_status.value),
         candidates=scored_schemas,
+    )
+
+
+def _decision_to_response(decision) -> ResolutionDecisionResponse:
+    """Translate a ResolutionDecision domain model to the API response schema."""
+    return ResolutionDecisionResponse(
+        mention_id=decision.mention_id,
+        outcome=ResolutionOutcomeSchema(decision.outcome.value),
+        selected_entity_id=decision.selected_entity_id,
+        top_score=decision.top_score,
+        second_score=decision.second_score,
+        score_margin=decision.score_margin,
+        reason=decision.reason,
     )
 
 
@@ -319,6 +362,48 @@ def get_mention_scored_candidates(
             detail=str(exc),
         ) from exc
     return _scored_candidates_to_response(mention, scored)
+
+
+@router.post(
+    "/mentions/{mention_id}/resolve",
+    response_model=ResolutionDecisionResponse,
+    summary="Resolve an entity mention",
+    description=(
+        "Apply the Resolution Decision Engine to an unresolved entity mention "
+        "and return an explainable decision.\n\n"
+        "The engine applies a deterministic threshold + margin policy to the "
+        "scored candidates and produces one of three outcomes:\n\n"
+        "- **RESOLVED**: the top candidate exceeded the confidence threshold and "
+        "had sufficient margin over the second candidate.  The mention's "
+        "entity_id is updated to the selected entity.\n"
+        "- **AMBIGUOUS**: the top candidate exceeded the threshold but was too "
+        "close to the second candidate.  No entity is assigned.\n"
+        "- **UNRESOLVED**: no candidate met the confidence threshold.  "
+        "No entity is assigned.\n\n"
+        "**Score semantics**: top_score and second_score are lexical similarity "
+        "scores in [0.0, 1.0].  They are NOT probabilities.  A score of 0.92 "
+        "means the candidate received a lexical similarity score of 0.92 — not "
+        "that there is a 92 % chance the entity is correct.\n\n"
+        "**Idempotency**: if the mention is already RESOLVED, the engine returns "
+        "the current state without modification (RESOLVED mentions are never "
+        "downgraded).\n\n"
+        "This endpoint may modify the mention's resolution_status and entity_id "
+        "(only the Resolution Decision stage may do this)."
+    ),
+)
+def resolve_mention(
+    mention_id: str,
+    service: ResolutionService = Depends(get_resolution_service),
+) -> ResolutionDecisionResponse:
+    """Apply the resolution decision engine and return the explainable decision."""
+    try:
+        decision = service.resolve(mention_id)
+    except ResolutionMentionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _decision_to_response(decision)
 
 
 @router.get(

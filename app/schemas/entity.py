@@ -30,11 +30,31 @@ class EntityTypeSchema(str, Enum):
 class ResolutionStatusSchema(str, Enum):
     """Resolution status values returned by the API.
 
-    Kept as an enum so future states (PENDING_REVIEW, AMBIGUOUS, REJECTED)
-    can be added without changing the API contract.
+    Mirrors the domain model's ResolutionStatus enum.
+    Kept as an independent enum so the API surface can evolve separately
+    from the internal model if needed.
     """
 
     RESOLVED = "RESOLVED"
+    UNRESOLVED = "UNRESOLVED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class ResolutionOutcomeSchema(str, Enum):
+    """Resolution outcome values returned by the Resolution Decision endpoint.
+
+    The outcome is the decision engine's verdict for a specific invocation.
+    It is separate from ResolutionStatusSchema (the stored mention state)
+    to allow the two to diverge cleanly in future API versions.
+
+    RESOLVED   — the engine selected a canonical entity for this mention.
+    AMBIGUOUS  — the top candidate exceeded the threshold but was too close
+                 to the second candidate; no entity was selected.
+    UNRESOLVED — no candidate met the confidence threshold; no entity selected.
+    """
+
+    RESOLVED = "RESOLVED"
+    AMBIGUOUS = "AMBIGUOUS"
     UNRESOLVED = "UNRESOLVED"
 
 
@@ -452,6 +472,115 @@ class ScoredCandidatesResponse(BaseModel):
                     "mention_id": "m_002",
                     "resolution_status": "RESOLVED",
                     "candidates": [],
+                },
+            ]
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Resolution Decision schemas
+# ---------------------------------------------------------------------------
+
+class ResolutionDecisionResponse(BaseModel):
+    """Response body for POST /entities/mentions/{mention_id}/resolve.
+
+    Records the decision made by the Resolution Decision Engine together with
+    enough evidence to explain why the decision was reached.
+
+    Important: top_score and second_score are lexical similarity scores in
+    [0.0, 1.0].  They are NOT probabilities.  A score of 0.92 means the
+    candidate received a lexical similarity score of 0.92 under the scoring
+    function — NOT that there is a 92 % chance the entity is correct.
+    """
+
+    mention_id: str = Field(
+        ..., description="ID of the mention the decision was made for."
+    )
+    outcome: ResolutionOutcomeSchema = Field(
+        ...,
+        description=(
+            "The engine's decision: RESOLVED, AMBIGUOUS, or UNRESOLVED.  "
+            "RESOLVED means the mention was matched to a canonical entity.  "
+            "AMBIGUOUS means candidates were found but no clear winner existed.  "
+            "UNRESOLVED means no candidate met the confidence threshold."
+        ),
+    )
+    selected_entity_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "ID of the canonical entity selected when outcome is RESOLVED.  "
+            "Always null for AMBIGUOUS and UNRESOLVED decisions."
+        ),
+    )
+    top_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Lexical similarity score of the top-ranked candidate in [0.0, 1.0].  "
+            "This is NOT a probability — it is the raw output of the scoring function.  "
+            "Null when there were no candidates."
+        ),
+    )
+    second_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Lexical similarity score of the second-ranked candidate in [0.0, 1.0].  "
+            "Null when there were fewer than two candidates."
+        ),
+    )
+    score_margin: Optional[float] = Field(
+        default=None,
+        description=(
+            "Difference between top_score and second_score (top − second).  "
+            "Null when second_score is null.  "
+            "A larger margin indicates a more clearly dominant top candidate."
+        ),
+    )
+    reason: str = Field(
+        ...,
+        description="Human-readable explanation of why this decision was made.",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "mention_id": "m_001",
+                    "outcome": "RESOLVED",
+                    "selected_entity_id": "entity_001",
+                    "top_score": 0.94,
+                    "second_score": 0.40,
+                    "score_margin": 0.54,
+                    "reason": (
+                        "Top candidate exceeded the confidence threshold "
+                        "(0.9400 >= 0.8500) and had sufficient margin over the "
+                        "second candidate (margin 0.5400 >= 0.1000)."
+                    ),
+                },
+                {
+                    "mention_id": "m_002",
+                    "outcome": "AMBIGUOUS",
+                    "selected_entity_id": None,
+                    "top_score": 0.91,
+                    "second_score": 0.90,
+                    "score_margin": 0.01,
+                    "reason": (
+                        "Top candidate exceeded the confidence threshold but "
+                        "was too close to the second candidate."
+                    ),
+                },
+                {
+                    "mention_id": "m_003",
+                    "outcome": "UNRESOLVED",
+                    "selected_entity_id": None,
+                    "top_score": 0.55,
+                    "second_score": None,
+                    "score_margin": None,
+                    "reason": "No candidate exceeded the confidence threshold.",
                 },
             ]
         }
