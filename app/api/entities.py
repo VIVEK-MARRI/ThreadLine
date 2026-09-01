@@ -46,6 +46,7 @@ from app.schemas.entity import (
     ScoredCandidatesResponse,
     ScoredEntityCandidateSchema,
 )
+from app.schemas.correlation import EntityCorrelationResponse, EntityObservationSchema
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -56,6 +57,7 @@ from app.services.resolution_service import (
     ResolutionService,
     MentionNotFoundError as ResolutionMentionNotFoundError,
 )
+from app.services.correlation_service import CorrelationService
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,12 @@ router = APIRouter(prefix="/entities", tags=["Entities"])
 # ---------------------------------------------------------------------------
 _entity_repository = InMemoryEntityRepository()
 _mention_repository = InMemoryMentionRepository()
+
+# Shared meeting repository — imported from the meetings router so that
+# correlation queries see meetings ingested via POST /meetings.
+# This import is deferred to avoid circular-import issues at module load time;
+# get_meeting_repository() is called at request time inside the dependency.
+from app.api.meetings import get_meeting_repository as _get_shared_meeting_repository  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +141,21 @@ def get_resolution_service() -> ResolutionService:
         entity_repo=_entity_repository,
         scoring_service=scoring_service,
         policy=ThresholdResolutionPolicy(),
+    )
+
+
+def get_correlation_service() -> CorrelationService:
+    """FastAPI dependency that provides a configured CorrelationService.
+
+    Uses the shared entity and mention repository singletons plus the
+    meeting repository singleton from the meetings router — all three must
+    refer to the same in-memory stores for correlation to see data created
+    by other endpoints.
+    """
+    return CorrelationService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
     )
 
 
@@ -224,6 +247,28 @@ def _decision_to_response(decision) -> ResolutionDecisionResponse:
         second_score=decision.second_score,
         score_margin=decision.score_margin,
         reason=decision.reason,
+    )
+
+
+def _correlation_to_response(correlation) -> EntityCorrelationResponse:
+    """Translate an EntityCorrelation domain model to the API response schema."""
+    observation_schemas = [
+        EntityObservationSchema(
+            meeting_id=obs.meeting_id,
+            meeting_title=obs.meeting_title,
+            meeting_date=obs.meeting_date,
+            mention_id=obs.mention_id,
+            mention_text=obs.mention_text,
+            source_text=obs.source_text,
+        )
+        for obs in correlation.observations
+    ]
+    return EntityCorrelationResponse(
+        entity_id=correlation.entity_id,
+        canonical_name=correlation.canonical_name,
+        entity_type=EntityTypeSchema(correlation.entity_type.value),
+        observation_count=len(observation_schemas),
+        observations=observation_schemas,
     )
 
 
@@ -426,6 +471,45 @@ def list_entities(
     domain_type = EntityType(entity_type.value) if entity_type is not None else None
     entities = service.list_entities(entity_type=domain_type)
     return [_entity_to_response(e) for e in entities]
+
+
+@router.get(
+    "/{entity_id}/correlations",
+    response_model=EntityCorrelationResponse,
+    summary="Retrieve cross-meeting correlation history for an entity",
+    description=(
+        "Return the chronological cross-meeting history of a canonical entity: "
+        "all resolved observations (mentions) of that entity across all meetings, "
+        "ordered by meeting_date ascending.\n\n"
+        "**This endpoint answers: 'What observations involving this entity exist "
+        "across different meetings?'** — not 'Who is this entity?' (that is "
+        "entity resolution).\n\n"
+        "**Resolution safety rules:**\n"
+        "- Only RESOLVED mentions participate (entity_id != null, "
+        "resolution_status=RESOLVED).\n"
+        "- AMBIGUOUS and UNRESOLVED mentions are excluded.\n\n"
+        "**Ordering:** (meeting_date ASC, meeting_id ASC, mention_id ASC) — "
+        "fully deterministic, using only real data fields.\n\n"
+        "**Returns HTTP 200** with an empty observations list when the entity "
+        "exists but has no resolved mentions.\n"
+        "**Returns HTTP 404** if the entity_id does not exist.\n\n"
+        "This endpoint is read-only: it never creates or modifies entities, "
+        "mentions, or resolution state."
+    ),
+)
+def get_entity_correlations(
+    entity_id: str,
+    service: CorrelationService = Depends(get_correlation_service),
+) -> EntityCorrelationResponse:
+    """Return the cross-meeting correlation history for a canonical entity."""
+    try:
+        correlation = service.get_entity_correlations(entity_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _correlation_to_response(correlation)
 
 
 @router.get(

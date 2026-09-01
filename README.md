@@ -18,7 +18,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first five stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), and the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes).
+**Today's implementation** covers the first six stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), and **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings).
 
 ---
 
@@ -779,9 +779,179 @@ pytest tests/test_meetings.py -v
 
 # Run only resolution decision tests
 pytest tests/test_resolution.py -v
+
+# Run only correlation tests
+pytest tests/test_correlation.py -v
 ```
 
 All tests are fully deterministic — no LLM calls, no network access, no database required.
+
+---
+
+## Cross-Meeting Correlation
+
+Cross-Meeting Correlation is the sixth stage of the pipeline, operating after the Resolution Decision Engine.
+
+It answers a fundamentally different question from entity resolution:
+
+| Stage | Question answered |
+|---|---|
+| **Entity Resolution** | *"Who or what is this mention referring to?"* |
+| **Cross-Meeting Correlation** | *"What observations involving this resolved entity exist across meetings?"* |
+
+### Why they are separate
+
+Entity resolution assigns identity. Cross-meeting correlation retrieves history. Mixing them would violate the single-responsibility principle and make each harder to test and audit independently.
+
+Correlation assumes entity resolution has already happened. It consumes the results — it never re-runs them.
+
+### What it does
+
+Given a canonical entity ID, the correlation layer:
+
+1. Fetches the canonical entity from the registry.
+2. Retrieves all mentions linked to that entity by `entity_id`.
+3. Filters to **only RESOLVED mentions** — AMBIGUOUS and UNRESOLVED mentions are excluded.
+4. Joins each mention with its meeting to retrieve `title` and `meeting_date`.
+5. Returns all observations ordered chronologically.
+
+### Example
+
+After entity resolution across three meetings:
+
+```
+Meeting A (2026-08-21):
+  mention: "Rahul" (RESOLVED → entity_001)
+  source:  "Rahul will fix the payment API."
+
+Meeting B (2026-08-28):
+  mention: "Rahul Kumar" (RESOLVED → entity_001)
+  source:  "Rahul Kumar is still investigating the payment API."
+
+Meeting C (2026-09-04):
+  mention: "Rahul" (RESOLVED → entity_001)
+  source:  "Rahul said the issue is still open."
+```
+
+Correlation returns all three observations as one ordered history for entity_001.
+
+### Resolution safety rules
+
+| Status | entity_id | Participates in correlation? |
+|---|---|---|
+| RESOLVED | set to canonical entity ID | **Yes** |
+| AMBIGUOUS | None | **No** |
+| UNRESOLVED | None | **No** |
+
+Correlation never re-runs resolution, never assigns entity_ids, and never creates entities.
+
+### Deterministic ordering
+
+Observations are always returned in a stable, deterministic order:
+
+```
+Primary:   meeting_date   ASC  (earliest observations first)
+Secondary: meeting_id     ASC  (stable string sort for same-date meetings)
+Tertiary:  mention_id     ASC  (handles same entity mentioned twice in one meeting)
+```
+
+All three sort keys are real fields from the existing domain models. No timestamps are invented.
+
+### Architecture
+
+```
+CorrelationService
+    │
+    ├── AbstractEntityRepository   (fetch the canonical entity)
+    ├── AbstractMentionRepository  (list all mentions by entity_id)
+    └── AbstractMeetingRepository  (get meeting title + date for each mention)
+```
+
+The service is deliberately separate from `EntityService` and `ResolutionService`:
+- `EntityService` owns entity lifecycle and exact-match resolution.
+- `ResolutionService` owns resolution decisions.
+- `CorrelationService` owns cross-meeting aggregation.
+
+No new repository is introduced. Correlation is computed from three existing repositories.
+
+### Data flow
+
+```
+RESOLVED CANONICAL ENTITY
+        ↓
+FIND ALL RESOLVED MENTIONS  (list_by_entity_id + filter status==RESOLVED)
+        ↓
+JOIN WITH THEIR MEETINGS    (get_by_id for each mention.meeting_id)
+        ↓
+ORDER CHRONOLOGICALLY       (meeting_date, meeting_id, mention_id)
+        ↓
+RETURN EXPLAINABLE CROSS-MEETING HISTORY
+```
+
+### API endpoint
+
+```
+GET /api/v1/entities/{entity_id}/correlations
+```
+
+**Why `correlations` not `history`?**
+Existing patterns use noun-plurals (`/entities`, `/mentions`, `/candidates`). `history` implies temporal state tracking (a later stage). `correlations` precisely describes cross-meeting aggregation.
+
+**Response (200 OK — entity with resolved mentions):**
+
+```json
+{
+  "entity_id": "entity_001",
+  "canonical_name": "rahul kumar",
+  "entity_type": "PERSON",
+  "observation_count": 3,
+  "observations": [
+    {
+      "meeting_id": "meeting-a",
+      "meeting_title": "Sprint Planning",
+      "meeting_date": "2026-08-21T10:00:00Z",
+      "mention_id": "m_001",
+      "mention_text": "Rahul",
+      "source_text": "Rahul will fix the payment API."
+    },
+    {
+      "meeting_id": "meeting-b",
+      "meeting_title": "Weekly Sync",
+      "meeting_date": "2026-08-28T10:00:00Z",
+      "mention_id": "m_002",
+      "mention_text": "Rahul Kumar",
+      "source_text": "Rahul Kumar is still investigating the payment API."
+    }
+  ]
+}
+```
+
+**Response (200 OK — entity with no resolved mentions):**
+
+```json
+{
+  "entity_id": "entity_002",
+  "canonical_name": "payment api instability",
+  "entity_type": "ISSUE",
+  "observation_count": 0,
+  "observations": []
+}
+```
+
+`404` is returned only if the `entity_id` does not exist. An empty correlation history is **not** an error.
+
+### What is intentionally NOT implemented
+
+The following capabilities belong to later pipeline stages and are **explicitly excluded** from this implementation:
+
+- Temporal state transitions (e.g. OPEN → IN PROGRESS → RESOLVED)
+- Knowledge graph or graph database
+- Embeddings / vector search
+- LLM-based correlation or inference
+- Fuzzy entity matching within correlation
+- Automatic inference of relationships between observations
+- Risk detection or issue state tracking
+- Background workers or async aggregation
 
 ---
 
@@ -792,24 +962,27 @@ app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
 │   ├── meetings.py                      # HTTP routing for meetings + extraction
-│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution
+│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution, correlation
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
 │   ├── extraction.py                    # Internal extraction domain models
-│   └── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate,
-│                                        #   ScoredEntityCandidate, ResolutionDecision,
-│                                        #   EntityType, ResolutionStatus, ResolutionOutcome
+│   ├── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate,
+│   │                                   #   ScoredEntityCandidate, ResolutionDecision,
+│   │                                   #   EntityType, ResolutionStatus, ResolutionOutcome
+│   └── correlation.py                   # EntityObservation, EntityCorrelation (read-models)
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
-│   └── entity.py                        # Entity, mention, candidate, scoring, decision schemas
+│   ├── entity.py                        # Entity, mention, candidate, scoring, decision schemas
+│   └── correlation.py                   # Cross-meeting correlation API response schema
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
 │   ├── entity_service.py               # Entity creation + mention registration
 │   ├── candidate_service.py            # Candidate generation orchestration
 │   ├── candidate_scoring_service.py     # Candidate scoring orchestration
-│   └── resolution_service.py            # Resolution Decision orchestration (Stage 4)
+│   ├── resolution_service.py            # Resolution Decision orchestration (Stage 4)
+│   └── correlation_service.py           # Cross-meeting correlation (Stage 5, read-only)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -836,7 +1009,8 @@ tests/
 ├── test_entities.py                     # Entity registry + mention resolution tests
 ├── test_candidates.py                   # Candidate generation tests
 ├── test_scoring.py                      # Candidate scoring tests
-└── test_resolution.py                   # Resolution Decision Engine tests
+├── test_resolution.py                   # Resolution Decision Engine tests
+└── test_correlation.py                  # Cross-Meeting Correlation tests
 ```
 
 ---
@@ -857,6 +1031,9 @@ tests/
 - **Candidate generation is read-only:** `CandidateService.get_candidates()` never modifies `resolution_status` or `entity_id`. Candidates are suggestions, not decisions.
 - **Scoring is read-only:** `CandidateScoringService.get_scored_candidates()` never modifies any mention or entity. Scores are evidence, not actions.
 - **Resolution Decision is the only mutating stage:** Only `ResolutionService.resolve()` may update a mention's `entity_id` and `resolution_status`. No other stage does this.
+- **Correlation is strictly read-only:** `CorrelationService.get_entity_correlations()` never modifies any entity, mention, or resolution state. It aggregates existing resolved data.
+- **Correlation safety:** Only RESOLVED mentions (entity_id != None AND resolution_status == RESOLVED) participate in correlation. AMBIGUOUS and UNRESOLVED mentions are explicitly excluded with a defense-in-depth filter.
+- **Shared repository singletons:** The meetings and entities routers share the same `MeetingRepository` instance via a `get_meeting_repository()` accessor exported from `meetings.py`. This ensures correlation sees all ingested meetings.
 - **Score ≠ probability:** Lexical similarity scores are outputs of the scoring function. They are explicitly documented as non-probabilistic throughout the codebase.
 - **Safe abstention:** The system prefers AMBIGUOUS/UNRESOLVED over incorrect RESOLVED. Incorrect entity assignments are harder to fix than unresolved mentions.
 - **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.

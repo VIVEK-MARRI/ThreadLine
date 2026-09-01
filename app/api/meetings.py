@@ -52,6 +52,16 @@ _meeting_repository: AbstractMeetingRepository = InMemoryMeetingRepository()
 _extraction_repository: AbstractExtractionRepository = InMemoryExtractionRepository()
 
 
+def get_meeting_repository() -> AbstractMeetingRepository:
+    """Return the shared MeetingRepository singleton.
+
+    Exported so other routers (e.g. entities/correlation) can share the
+    same instance and see meetings ingested via this router.  This avoids
+    duplicating the singleton and keeps all meeting data in one store.
+    """
+    return _meeting_repository
+
+
 # ---------------------------------------------------------------------------
 # Provider factory
 # ---------------------------------------------------------------------------
