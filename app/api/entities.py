@@ -17,6 +17,11 @@ Ordering note
 All /entities/mentions/* routes must be declared BEFORE /entities/{entity_id}
 so that FastAPI routes the literal path segment "mentions" correctly rather
 than treating it as a dynamic entity_id.
+
+Sub-resource routes (/{entity_id}/timeline, /{entity_id}/correlations,
+/{entity_id}/memory) must also be declared BEFORE /{entity_id} to prevent
+FastAPI from incorrectly matching 'timeline', 'correlations', or 'memory'
+as entity_id values.
 """
 
 import logging
@@ -52,6 +57,11 @@ from app.schemas.temporal import (
     StateObservationSchema as TimelineObservationSchema,
     TemporalStateSchema,
 )
+from app.schemas.memory import (
+    EntityMemoryResponse,
+    EntityMemoryFactSchema,
+    MemoryFactTypeSchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -64,6 +74,7 @@ from app.services.resolution_service import (
 )
 from app.services.correlation_service import CorrelationService
 from app.services.temporal_state_service import TemporalStateService
+from app.services.organisational_memory_service import OrganisationalMemoryService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -183,6 +194,24 @@ def get_correlation_service() -> CorrelationService:
     )
 
 
+def get_organisational_memory_service() -> OrganisationalMemoryService:
+    """FastAPI dependency that provides a configured OrganisationalMemoryService.
+
+    Uses the shared entity, mention, and meeting repository singletons plus
+    the default keyword-based interpreter and transition policy.
+    OrganisationalMemoryService internally composes TemporalStateService,
+    which in turn composes CorrelationService — all share the same stores.
+    All components are stateless and can be recreated freely.
+    """
+    return OrganisationalMemoryService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
@@ -271,6 +300,32 @@ def _decision_to_response(decision) -> ResolutionDecisionResponse:
         second_score=decision.second_score,
         score_margin=decision.score_margin,
         reason=decision.reason,
+    )
+
+
+def _memory_to_response(memory) -> EntityMemoryResponse:
+    """Translate an EntityMemory domain model to the API response schema."""
+    fact_schemas = [
+        EntityMemoryFactSchema(
+            fact_type=MemoryFactTypeSchema(f.fact_type.value),
+            value=f.value,
+            source_meeting_id=f.source_meeting_id,
+            source_mention_id=f.source_mention_id,
+            observed_at=f.observed_at,
+            detail=f.detail,
+        )
+        for f in memory.facts
+    ]
+    return EntityMemoryResponse(
+        entity_id=memory.entity_id,
+        canonical_name=memory.canonical_name,
+        entity_type=EntityTypeSchema(memory.entity_type.value),
+        first_observed_at=memory.first_observed_at,
+        last_observed_at=memory.last_observed_at,
+        meeting_count=memory.meeting_count,
+        observation_count=memory.observation_count,
+        current_state=TemporalStateSchema(memory.current_state.value),
+        facts=fact_schemas,
     )
 
 
@@ -525,6 +580,49 @@ def list_entities(
     domain_type = EntityType(entity_type.value) if entity_type is not None else None
     entities = service.list_entities(entity_type=domain_type)
     return [_entity_to_response(e) for e in entities]
+
+
+@router.get(
+    "/{entity_id}/memory",
+    response_model=EntityMemoryResponse,
+    summary="Retrieve the organisational memory record for an entity",
+    description=(
+        "Return the structured organisational memory of a canonical entity: "
+        "all evidence-backed facts the organisation knows about it, derived "
+        "deterministically from its complete observation history.\n\n"
+        "**This endpoint answers: 'What does the organisation currently know "
+        "about this entity based on all available evidence?'**\n\n"
+        "**Memory fact types:**\n"
+        "- **FIRST_OBSERVED**: earliest resolved observation (meeting + mention).\n"
+        "- **LAST_OBSERVED**: most recent observation (only when >= 2 exist).\n"
+        "- **CURRENT_STATE**: current lifecycle state (aggregate — no single evidence source).\n"
+        "- **STATE_TRANSITION**: each valid lifecycle state change, with evidence.\n"
+        "- **REPEATED_OBSERVATION**: each meeting where entity appeared >= 2 times.\n\n"
+        "**Evidence grounding**: every fact (except CURRENT_STATE) traces directly "
+        "to a specific meeting and/or mention.\n\n"
+        "**Read-only guarantees:**\n"
+        "- Only RESOLVED mentions participate.\n"
+        "- AMBIGUOUS and UNRESOLVED mentions are excluded.\n"
+        "- This endpoint never creates or modifies entities, mentions, or resolution state.\n"
+        "- It never re-runs extraction, candidate generation, scoring, or resolution.\n\n"
+        "**Returns HTTP 200** with a valid memory object (facts=[CURRENT_STATE]) "
+        "when the entity exists but has no resolved mentions.\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_memory(
+    entity_id: str,
+    service: OrganisationalMemoryService = Depends(get_organisational_memory_service),
+) -> EntityMemoryResponse:
+    """Return the organisational memory record for a canonical entity."""
+    try:
+        memory = service.get_entity_memory(entity_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _memory_to_response(memory)
 
 
 @router.get(

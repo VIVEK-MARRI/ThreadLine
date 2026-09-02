@@ -18,7 +18,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first seven stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), and the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time).
+**Today's implementation** covers the first eight stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), and **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history).
 
 ---
 
@@ -785,6 +785,9 @@ pytest tests/test_correlation.py -v
 
 # Run only temporal state engine tests
 pytest tests/test_temporal.py -v
+
+# Run only organisational memory tests
+pytest tests/test_memory.py -v
 ```
 
 All tests are fully deterministic — no LLM calls, no network access, no database required.
@@ -1158,6 +1161,116 @@ The following capabilities belong to later pipeline stages and are **explicitly 
 
 ---
 
+## Organisational Memory
+
+Organisational Memory is the **eighth stage** of the pipeline, sitting above Cross-Meeting Correlation and the Temporal State Engine.
+
+It answers the ultimate aggregation question:
+
+> **"What does the organisation currently know about this entity based on all available evidence?"**
+
+### Why it exists
+
+While Correlation lists raw observations and Temporal State tracks lifecycle changes, humans need a synthesized, immediately readable summary of facts. The Organisational Memory layer aggregates the underlying timelines and correlations into a set of highly structured, epistemically grounded **memory facts**.
+
+### Memory Fact Types
+
+Every memory fact (except `CURRENT_STATE`) is strictly grounded in evidence, pointing back to a specific meeting and/or mention.
+
+| Fact Type | Meaning |
+|---|---|
+| **FIRST_OBSERVED** | The earliest resolved observation across all meetings. |
+| **LAST_OBSERVED** | The most recent resolved observation (only present if ≥ 2 observations exist). |
+| **CURRENT_STATE** | The entity's current lifecycle state (an aggregate fact, no single evidence pointer). |
+| **STATE_TRANSITION** | A valid lifecycle state transition that actually occurred. |
+| **REPEATED_OBSERVATION** | A meeting in which this entity was observed two or more times. |
+
+Invalid state transitions (those skipped by the Temporal State Engine) are **not** promoted to memory facts.
+
+### Invariants (always hold)
+
+- **Read-only**: The service never creates entities, resolves mentions, or triggers candidate generation.
+- **No Hallucination**: No LLMs, embeddings, or heuristic guess-work are used. Every fact traces to existing resolved observations.
+- **Deterministic**: Given the same underlying meetings and mentions, the memory representation is identically ordered and constructed.
+- **Safe Filtering**: Only `RESOLVED` mentions participate. `UNRESOLVED` and `AMBIGUOUS` mentions are strictly excluded.
+- **Chronological Timestamps**: Uses the actual meeting dates (`meeting_date`) for all timestamps, never `datetime.now()`.
+
+### API endpoint
+
+```
+GET /api/v1/entities/{entity_id}/memory
+```
+
+**Response (200 OK — entity with rich history):**
+
+```json
+{
+  "entity_id": "entity_001",
+  "canonical_name": "payment api instability",
+  "entity_type": "ISSUE",
+  "first_observed_at": "2026-08-01T10:00:00Z",
+  "last_observed_at": "2026-08-22T10:00:00Z",
+  "meeting_count": 3,
+  "observation_count": 4,
+  "current_state": "BLOCKED",
+  "facts": [
+    {
+      "fact_type": "FIRST_OBSERVED",
+      "value": "2026-08-01T10:00:00+00:00",
+      "source_meeting_id": "meeting_001",
+      "source_mention_id": "mention_abc",
+      "observed_at": "2026-08-01T10:00:00Z",
+      "detail": "Sprint Planning"
+    },
+    {
+      "fact_type": "CURRENT_STATE",
+      "value": "BLOCKED",
+      "source_meeting_id": null,
+      "source_mention_id": null,
+      "observed_at": null,
+      "detail": null
+    },
+    {
+      "fact_type": "STATE_TRANSITION",
+      "value": "UNKNOWN → IN_PROGRESS",
+      "source_meeting_id": "meeting_001",
+      "source_mention_id": "mention_abc",
+      "observed_at": "2026-08-01T10:00:00Z",
+      "detail": "Sprint Planning"
+    }
+  ]
+}
+```
+
+**Response (200 OK — entity with no resolved mentions):**
+
+```json
+{
+  "entity_id": "entity_002",
+  "canonical_name": "database timeout",
+  "entity_type": "ISSUE",
+  "first_observed_at": null,
+  "last_observed_at": null,
+  "meeting_count": 0,
+  "observation_count": 0,
+  "current_state": "UNKNOWN",
+  "facts": [
+    {
+      "fact_type": "CURRENT_STATE",
+      "value": "UNKNOWN",
+      "source_meeting_id": null,
+      "source_mention_id": null,
+      "observed_at": null,
+      "detail": null
+    }
+  ]
+}
+```
+
+Returns `404` only if the `entity_id` does not exist.
+
+---
+
 ## Project Structure
 
 ```
@@ -1173,13 +1286,15 @@ app/
 │   │                                   #   ScoredEntityCandidate, ResolutionDecision,
 │   │                                   #   EntityType, ResolutionStatus, ResolutionOutcome
 │   ├── correlation.py                   # EntityObservation, EntityCorrelation (read-models)
-│   └── temporal.py                      # TemporalState, StateObservation, EntityTimeline (read-models)
+│   ├── temporal.py                      # TemporalState, StateObservation, EntityTimeline (read-models)
+│   └── memory.py                        # MemoryFactType, EntityMemoryFact, EntityMemory (read-models)
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
 │   ├── entity.py                        # Entity, mention, candidate, scoring, decision schemas
 │   ├── correlation.py                   # Cross-meeting correlation API response schema
-│   └── temporal.py                      # Temporal State Engine API response schema
+│   ├── temporal.py                      # Temporal State Engine API response schema
+│   └── memory.py                        # Organisational Memory API response schema
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
@@ -1188,7 +1303,8 @@ app/
 │   ├── candidate_scoring_service.py     # Candidate scoring orchestration
 │   ├── resolution_service.py            # Resolution Decision orchestration (Stage 4)
 │   ├── correlation_service.py           # Cross-meeting correlation (Stage 5, read-only)
-│   └── temporal_state_service.py        # Temporal State Engine orchestration (Stage 6, read-only)
+│   ├── temporal_state_service.py        # Temporal State Engine orchestration (Stage 6, read-only)
+│   └── organisational_memory_service.py # Organisational Memory orchestration (Stage 7, read-only)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -1221,7 +1337,8 @@ tests/
 ├── test_scoring.py                      # Candidate scoring tests
 ├── test_resolution.py                   # Resolution Decision Engine tests
 ├── test_correlation.py                  # Cross-Meeting Correlation tests
-└── test_temporal.py                     # Temporal State Engine tests (106 tests)
+├── test_temporal.py                     # Temporal State Engine tests (106 tests)
+└── test_memory.py                       # Organisational Memory tests (14 tests)
 ```
 
 ---
@@ -1246,8 +1363,9 @@ tests/
 - **Resolution Decision is the only mutating stage:** Only `ResolutionService.resolve()` may update a mention's `entity_id` and `resolution_status`. No other stage does this.
 - **Correlation is strictly read-only:** `CorrelationService.get_entity_correlations()` never modifies any entity, mention, or resolution state. It aggregates existing resolved data.
 - **Temporal State Engine is strictly read-only:** `TemporalStateService.get_entity_timeline()` never modifies any entity, mention, or resolution state. It interprets resolved observations into a lifecycle timeline.
-- **Temporal state is computed on-read:** No new persistent table or repository is needed. State is derived deterministically from existing resolved mentions on every API call.
-- **Correlation safety:** Only RESOLVED mentions (entity_id != None AND resolution_status == RESOLVED) participate in correlation or temporal timelines. AMBIGUOUS and UNRESOLVED mentions are explicitly excluded.
+- **Organisational Memory is strictly read-only:** `OrganisationalMemoryService.get_entity_memory()` never modifies any entity, mention, or resolution state. It synthesizes history into structured facts.
+- **Temporal state & memory are computed on-read:** No new persistent table or repository is needed. State and memory facts are derived deterministically from existing resolved mentions on every API call.
+- **Correlation safety:** Only RESOLVED mentions (entity_id != None AND resolution_status == RESOLVED) participate in correlation, temporal timelines, and organisational memory. AMBIGUOUS and UNRESOLVED mentions are explicitly excluded.
 - **Temporal transition safety:** Invalid transitions (e.g., RESOLVED → IN_PROGRESS) are recorded in the timeline with `is_valid_transition=false` but never applied. The current state only advances through valid transitions.
 - **Shared repository singletons:** The meetings and entities routers share the same `MeetingRepository` instance via a `get_meeting_repository()` accessor exported from `meetings.py`. This ensures correlation and temporal queries see all ingested meetings.
 - **Score ≠ probability:** Lexical similarity scores are outputs of the scoring function. They are explicitly documented as non-probabilistic throughout the codebase.
