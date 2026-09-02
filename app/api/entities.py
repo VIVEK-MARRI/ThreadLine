@@ -47,6 +47,11 @@ from app.schemas.entity import (
     ScoredEntityCandidateSchema,
 )
 from app.schemas.correlation import EntityCorrelationResponse, EntityObservationSchema
+from app.schemas.temporal import (
+    EntityTimelineResponse,
+    StateObservationSchema as TimelineObservationSchema,
+    TemporalStateSchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -58,6 +63,9 @@ from app.services.resolution_service import (
     MentionNotFoundError as ResolutionMentionNotFoundError,
 )
 from app.services.correlation_service import CorrelationService
+from app.services.temporal_state_service import TemporalStateService
+from app.temporal.state_interpreter import KeywordStateInterpreter
+from app.temporal.transition_policy import DefaultTransitionPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +149,22 @@ def get_resolution_service() -> ResolutionService:
         entity_repo=_entity_repository,
         scoring_service=scoring_service,
         policy=ThresholdResolutionPolicy(),
+    )
+
+
+def get_temporal_state_service() -> TemporalStateService:
+    """FastAPI dependency that provides a configured TemporalStateService.
+
+    Uses the shared entity, mention, and meeting repository singletons plus
+    the default keyword-based interpreter and transition policy.
+    All components are stateless and can be recreated freely.
+    """
+    return TemporalStateService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
     )
 
 
@@ -247,6 +271,36 @@ def _decision_to_response(decision) -> ResolutionDecisionResponse:
         second_score=decision.second_score,
         score_margin=decision.score_margin,
         reason=decision.reason,
+    )
+
+
+def _timeline_to_response(timeline) -> EntityTimelineResponse:
+    """Translate an EntityTimeline domain model to the API response schema."""
+    obs_schemas = [
+        TimelineObservationSchema(
+            observation_index=obs.observation_index,
+            meeting_id=obs.meeting_id,
+            meeting_title=obs.meeting_title,
+            meeting_date=obs.meeting_date,
+            mention_id=obs.mention_id,
+            evidence_text=obs.evidence_text,
+            interpreted_state=TemporalStateSchema(obs.interpreted_state.value),
+            transition_occurred=obs.transition_occurred,
+            from_state=TemporalStateSchema(obs.from_state.value),
+            to_state=TemporalStateSchema(obs.to_state.value),
+            is_valid_transition=obs.is_valid_transition,
+            transition_skipped_reason=obs.transition_skipped_reason,
+        )
+        for obs in timeline.timeline
+    ]
+    return EntityTimelineResponse(
+        entity_id=timeline.entity_id,
+        canonical_name=timeline.canonical_name,
+        entity_type=EntityTypeSchema(timeline.entity_type.value),
+        current_state=TemporalStateSchema(timeline.current_state.value),
+        observation_count=timeline.observation_count,
+        transition_count=timeline.transition_count,
+        timeline=obs_schemas,
     )
 
 
@@ -471,6 +525,51 @@ def list_entities(
     domain_type = EntityType(entity_type.value) if entity_type is not None else None
     entities = service.list_entities(entity_type=domain_type)
     return [_entity_to_response(e) for e in entities]
+
+
+@router.get(
+    "/{entity_id}/timeline",
+    response_model=EntityTimelineResponse,
+    summary="Retrieve the temporal lifecycle timeline for an entity",
+    description=(
+        "Return the chronological temporal lifecycle timeline of a canonical entity: "
+        "all resolved observations (mentions) of that entity across all meetings, "
+        "interpreted for lifecycle state and ordered by meeting_date ascending.\n\n"
+        "**This endpoint answers: 'How does the state of this entity evolve over time "
+        "based on chronological observations?'**\n\n"
+        "**State vocabulary:** UNKNOWN, OPEN, IN_PROGRESS, BLOCKED, RESOLVED.\n\n"
+        "**State interpretation:** States are inferred from the source_text of each "
+        "resolved mention using a deterministic keyword-based interpreter.  "
+        "No LLM is used.\n\n"
+        "**Transition policy:** Only valid state transitions are applied.  "
+        "Invalid transitions (e.g., RESOLVED to IN_PROGRESS) are recorded in the "
+        "timeline with is_valid_transition=false but do not change the current state.\n\n"
+        "**Resolution safety rules:**\n"
+        "- Only RESOLVED mentions participate (entity_id != null, "
+        "resolution_status=RESOLVED).\n"
+        "- AMBIGUOUS and UNRESOLVED mentions are excluded.\n\n"
+        "**Ordering:** (meeting_date ASC, meeting_id ASC, mention_id ASC) — "
+        "fully deterministic, using only real data fields.\n\n"
+        "**Returns HTTP 200** with an empty timeline and current_state='UNKNOWN' "
+        "when the entity exists but has no resolved mentions.\n"
+        "**Returns HTTP 404** if the entity_id does not exist.\n\n"
+        "This endpoint is read-only: it never creates or modifies entities, "
+        "mentions, resolution state, or triggers any pipeline stage."
+    ),
+)
+def get_entity_timeline(
+    entity_id: str,
+    service: TemporalStateService = Depends(get_temporal_state_service),
+) -> EntityTimelineResponse:
+    """Return the temporal lifecycle timeline for a canonical entity."""
+    try:
+        timeline = service.get_entity_timeline(entity_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _timeline_to_response(timeline)
 
 
 @router.get(

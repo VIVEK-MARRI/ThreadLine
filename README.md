@@ -18,7 +18,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first six stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), and **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings).
+**Today's implementation** covers the first seven stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), and the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time).
 
 ---
 
@@ -782,9 +782,212 @@ pytest tests/test_resolution.py -v
 
 # Run only correlation tests
 pytest tests/test_correlation.py -v
+
+# Run only temporal state engine tests
+pytest tests/test_temporal.py -v
 ```
 
 All tests are fully deterministic — no LLM calls, no network access, no database required.
+
+---
+
+## Temporal State Engine
+
+The Temporal State Engine is the seventh stage of the pipeline, operating after Cross-Meeting Correlation.
+
+It answers a fundamentally different question:
+
+| Stage | Question answered |
+|---|---|
+| **Cross-Meeting Correlation** | *"What observations involving this entity exist across meetings?"* |
+| **Temporal State Engine** | *"How does the lifecycle state of this entity evolve over time based on chronological observations?"* |
+
+### Why they are separate
+
+Correlation aggregates raw observations. The Temporal State Engine interprets them for lifecycle state and enforces valid state transitions. Mixing the two would make each harder to test and audit independently.
+
+The Temporal State Engine is **read-only** — it never creates entities, re-runs resolution, triggers candidate generation or scoring, or modifies any mention's `entity_id` or `resolution_status`.
+
+### State vocabulary
+
+| State | Meaning |
+|---|---|
+| `UNKNOWN` | No state-bearing evidence found |
+| `OPEN` | Issue raised/identified but not yet started |
+| `IN_PROGRESS` | Actively being worked on |
+| `BLOCKED` | Blocked, stalled, or waiting on an external dependency |
+| `RESOLVED` | Completed, fixed, or closed |
+
+States apply to any entity type (ISSUE, PERSON, etc.) but are most meaningful for ISSUE entities. PERSON entities with no lifecycle keywords return `UNKNOWN`.
+
+### State interpretation (KeywordStateInterpreter)
+
+Lifecycle state is inferred from the `source_text` of each resolved mention using a deterministic **keyword-based priority scanner** — no LLM is used.
+
+**Priority order (highest wins when multiple keywords co-occur):**
+
+1. **RESOLVED** — `resolved`, `fixed`, `closed`, `completed`, `done`, `finished`
+2. **BLOCKED** — `blocked`, `blocker`, `stuck`, `stalled`, `waiting`
+3. **IN_PROGRESS** — `started`, `working on`, `in progress`, `in-progress`, `ongoing`, `underway`
+4. **OPEN** — `raised`, `identified`, `reported`, `created`, `new issue`, `filed`
+
+If no keyword is found, the state is `UNKNOWN` — observations still appear in the timeline but do not trigger a transition.
+
+**Priority example:** `"The blocked issue has been resolved."` → `RESOLVED` (beats `BLOCKED`).
+
+**Case-insensitive:** `"RESOLVED"` and `"Resolved"` both match.
+
+### Transition policy (DefaultTransitionPolicy)
+
+Only valid state transitions are applied. The policy is deterministic, evidence-backed, and always returns a `TransitionResult` (frozen dataclass).
+
+| Case | Condition | Action |
+|---|---|---|
+| **A** — UNKNOWN new state | Interpreter returns UNKNOWN | No-op (observation recorded, state unchanged) |
+| **B** — Repeated state | `new_state == current_state` | No-op (no duplicate transition) |
+| **C** — Valid transition | `(current_state, new_state)` in allowed table | Transition applied |
+| **D** — Invalid transition | `(current_state, new_state)` not in allowed table | Transition skipped; observation recorded with `is_valid_transition=false` |
+
+**Allowed transitions:**
+
+```
+UNKNOWN → OPEN, IN_PROGRESS, BLOCKED, RESOLVED
+OPEN    → IN_PROGRESS, BLOCKED, RESOLVED
+IN_PROGRESS → BLOCKED, RESOLVED
+BLOCKED → IN_PROGRESS, RESOLVED
+RESOLVED → (none — terminal state)
+```
+
+Invalid transitions (e.g., `RESOLVED → IN_PROGRESS`) are **recorded** in the timeline with `is_valid_transition=false` and a `transition_skipped_reason` explanation, but the `current_state` remains unchanged.
+
+### Resolution safety rules
+
+Only **RESOLVED** mentions participate in the timeline:
+- `entity_id != null` AND `resolution_status == RESOLVED`
+- AMBIGUOUS and UNRESOLVED mentions are excluded.
+- If the mention references a non-existent meeting, it is silently skipped.
+
+### Deterministic ordering
+
+Observations are always processed and returned in a stable, deterministic order:
+
+```
+Primary:   meeting_date   ASC  (earliest observations first)
+Secondary: meeting_id     ASC  (stable string sort for same-date meetings)
+Tertiary:  mention_id     ASC  (handles same entity mentioned twice in one meeting)
+```
+
+### Architecture
+
+```
+TemporalStateService
+    │
+    ├── AbstractEntityRepository      (fetch the canonical entity)
+    ├── AbstractMentionRepository     (list all resolved mentions for the entity)
+    ├── AbstractMeetingRepository     (get meeting title + date for each mention)
+    ├── AbstractStateInterpreter      (interpret source_text → TemporalState)
+    └── AbstractTemporalStatePolicy   (apply transition rules)
+```
+
+All five collaborators are injected via constructor — fully testable, no global state.
+
+### Data flow
+
+```
+CANONICAL ENTITY
+    ↓
+FIND ALL RESOLVED MENTIONS  (filter: entity_id == entity.entity_id AND status == RESOLVED)
+    ↓
+JOIN WITH THEIR MEETINGS    (skip if meeting not found)
+    ↓
+ORDER CHRONOLOGICALLY       (meeting_date, meeting_id, mention_id)
+    ↓
+FOR EACH OBSERVATION:
+    interpret source_text → TemporalState (keyword scanner)
+    apply transition policy → TransitionResult
+    record StateObservation (with full from/to/validity audit trail)
+    ↓
+RETURN EntityTimeline
+```
+
+### API endpoint
+
+```
+GET /api/v1/entities/{entity_id}/timeline
+```
+
+**Response (200 OK — entity with state-bearing observations):**
+
+```json
+{
+  "entity_id": "entity_001",
+  "canonical_name": "payment api instability",
+  "entity_type": "ISSUE",
+  "current_state": "RESOLVED",
+  "observation_count": 3,
+  "transition_count": 3,
+  "timeline": [
+    {
+      "observation_index": 0,
+      "meeting_id": "meeting-a",
+      "meeting_title": "Sprint Planning",
+      "meeting_date": "2026-08-21T10:00:00Z",
+      "mention_id": "m_001",
+      "evidence_text": "The payment API issue has started being investigated.",
+      "interpreted_state": "IN_PROGRESS",
+      "transition_occurred": true,
+      "from_state": "UNKNOWN",
+      "to_state": "IN_PROGRESS",
+      "is_valid_transition": true,
+      "transition_skipped_reason": null
+    },
+    {
+      "observation_index": 1,
+      "meeting_id": "meeting-b",
+      "meeting_title": "Weekly Sync",
+      "meeting_date": "2026-08-28T10:00:00Z",
+      "mention_id": "m_002",
+      "evidence_text": "We are blocked on infrastructure access.",
+      "interpreted_state": "BLOCKED",
+      "transition_occurred": true,
+      "from_state": "IN_PROGRESS",
+      "to_state": "BLOCKED",
+      "is_valid_transition": true,
+      "transition_skipped_reason": null
+    },
+    {
+      "observation_index": 2,
+      "meeting_id": "meeting-c",
+      "meeting_title": "Retrospective",
+      "meeting_date": "2026-09-04T10:00:00Z",
+      "mention_id": "m_003",
+      "evidence_text": "The payment API issue has been resolved.",
+      "interpreted_state": "RESOLVED",
+      "transition_occurred": true,
+      "from_state": "BLOCKED",
+      "to_state": "RESOLVED",
+      "is_valid_transition": true,
+      "transition_skipped_reason": null
+    }
+  ]
+}
+```
+
+**Response (200 OK — entity with no resolved mentions):**
+
+```json
+{
+  "entity_id": "entity_002",
+  "canonical_name": "payment api instability",
+  "entity_type": "ISSUE",
+  "current_state": "UNKNOWN",
+  "observation_count": 0,
+  "transition_count": 0,
+  "timeline": []
+}
+```
+
+`404` is returned only if the `entity_id` does not exist. An empty timeline is **not** an error.
 
 ---
 
@@ -962,19 +1165,21 @@ app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
 │   ├── meetings.py                      # HTTP routing for meetings + extraction
-│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution, correlation
+│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution, correlation, timeline
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
 │   ├── extraction.py                    # Internal extraction domain models
 │   ├── entity.py                        # CanonicalEntity, EntityMention, EntityCandidate,
 │   │                                   #   ScoredEntityCandidate, ResolutionDecision,
 │   │                                   #   EntityType, ResolutionStatus, ResolutionOutcome
-│   └── correlation.py                   # EntityObservation, EntityCorrelation (read-models)
+│   ├── correlation.py                   # EntityObservation, EntityCorrelation (read-models)
+│   └── temporal.py                      # TemporalState, StateObservation, EntityTimeline (read-models)
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
 │   ├── entity.py                        # Entity, mention, candidate, scoring, decision schemas
-│   └── correlation.py                   # Cross-meeting correlation API response schema
+│   ├── correlation.py                   # Cross-meeting correlation API response schema
+│   └── temporal.py                      # Temporal State Engine API response schema
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
@@ -982,7 +1187,8 @@ app/
 │   ├── candidate_service.py            # Candidate generation orchestration
 │   ├── candidate_scoring_service.py     # Candidate scoring orchestration
 │   ├── resolution_service.py            # Resolution Decision orchestration (Stage 4)
-│   └── correlation_service.py           # Cross-meeting correlation (Stage 5, read-only)
+│   ├── correlation_service.py           # Cross-meeting correlation (Stage 5, read-only)
+│   └── temporal_state_service.py        # Temporal State Engine orchestration (Stage 6, read-only)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -1000,6 +1206,10 @@ app/
 │   ├── lexical_candidate_generator.py   # Token-overlap candidate generation
 │   ├── lexical_candidate_scorer.py      # Weighted coverage scoring
 │   └── lexical_utils.py                 # Shared tokenisation utilities
+├── temporal/
+│   ├── __init__.py                      # Package marker
+│   ├── state_interpreter.py             # AbstractStateInterpreter + KeywordStateInterpreter
+│   └── transition_policy.py             # AbstractTemporalStatePolicy + DefaultTransitionPolicy
 └── core/
     └── config.py                        # Application settings
 
@@ -1010,7 +1220,8 @@ tests/
 ├── test_candidates.py                   # Candidate generation tests
 ├── test_scoring.py                      # Candidate scoring tests
 ├── test_resolution.py                   # Resolution Decision Engine tests
-└── test_correlation.py                  # Cross-Meeting Correlation tests
+├── test_correlation.py                  # Cross-Meeting Correlation tests
+└── test_temporal.py                     # Temporal State Engine tests (106 tests)
 ```
 
 ---
@@ -1022,6 +1233,8 @@ tests/
 - **Generator abstraction:** `AbstractCandidateGenerator` defines the candidate generation interface. Swap `LexicalCandidateGenerator` for an embedding-based or contextual generator without changing the service layer.
 - **Scorer abstraction:** `AbstractCandidateScorer` defines the scoring interface. Swap for any scoring implementation without touching services or the API.
 - **Policy abstraction:** `AbstractResolutionPolicy` defines the decision interface. Swap `ThresholdResolutionPolicy` for an ML-based or human-in-the-loop policy without restructuring the resolution service.
+- **Interpreter abstraction:** `AbstractStateInterpreter` defines the state interpretation interface. Swap `KeywordStateInterpreter` for an ML-based or LLM-based interpreter without touching the temporal service or API.
+- **Transition policy abstraction:** `AbstractTemporalStatePolicy` defines the transition policy interface. Swap `DefaultTransitionPolicy` for a domain-specific policy (e.g., allowing RESOLVED→IN_PROGRESS for certain entity types) without touching the temporal service.
 - **Testability:** `FakeExtractionProvider` makes all extraction tests deterministic with no LLM calls. Entity and candidate tests use isolated in-memory repositories via FastAPI dependency overrides.
 - **Repository abstraction:** All repositories (`AbstractMeetingRepository`, `AbstractExtractionRepository`, `AbstractEntityRepository`, `AbstractMentionRepository`) define storage contracts. Swap in PostgreSQL by implementing the same interfaces — service layers do not change.
 - **Domain model vs API schema:** Internal models (`app/models/`) evolve freely; public schemas (`app/schemas/`) remain the stable API contract.
@@ -1032,8 +1245,11 @@ tests/
 - **Scoring is read-only:** `CandidateScoringService.get_scored_candidates()` never modifies any mention or entity. Scores are evidence, not actions.
 - **Resolution Decision is the only mutating stage:** Only `ResolutionService.resolve()` may update a mention's `entity_id` and `resolution_status`. No other stage does this.
 - **Correlation is strictly read-only:** `CorrelationService.get_entity_correlations()` never modifies any entity, mention, or resolution state. It aggregates existing resolved data.
-- **Correlation safety:** Only RESOLVED mentions (entity_id != None AND resolution_status == RESOLVED) participate in correlation. AMBIGUOUS and UNRESOLVED mentions are explicitly excluded with a defense-in-depth filter.
-- **Shared repository singletons:** The meetings and entities routers share the same `MeetingRepository` instance via a `get_meeting_repository()` accessor exported from `meetings.py`. This ensures correlation sees all ingested meetings.
+- **Temporal State Engine is strictly read-only:** `TemporalStateService.get_entity_timeline()` never modifies any entity, mention, or resolution state. It interprets resolved observations into a lifecycle timeline.
+- **Temporal state is computed on-read:** No new persistent table or repository is needed. State is derived deterministically from existing resolved mentions on every API call.
+- **Correlation safety:** Only RESOLVED mentions (entity_id != None AND resolution_status == RESOLVED) participate in correlation or temporal timelines. AMBIGUOUS and UNRESOLVED mentions are explicitly excluded.
+- **Temporal transition safety:** Invalid transitions (e.g., RESOLVED → IN_PROGRESS) are recorded in the timeline with `is_valid_transition=false` but never applied. The current state only advances through valid transitions.
+- **Shared repository singletons:** The meetings and entities routers share the same `MeetingRepository` instance via a `get_meeting_repository()` accessor exported from `meetings.py`. This ensures correlation and temporal queries see all ingested meetings.
 - **Score ≠ probability:** Lexical similarity scores are outputs of the scoring function. They are explicitly documented as non-probabilistic throughout the codebase.
 - **Safe abstention:** The system prefers AMBIGUOUS/UNRESOLVED over incorrect RESOLVED. Incorrect entity assignments are harder to fix than unresolved mentions.
 - **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.
