@@ -12,6 +12,7 @@ GET    /entities/{entity_id}                         Retrieve a canonical entity
 POST   /entities/mentions                            Register an entity mention (resolved or unresolved)
 GET    /entities/mentions/{mention_id}/candidates    Candidate generation for an unresolved mention
 GET    /entities/{entity_id}/insights               Retrieve derived insights for an entity
+GET    /entities/{entity_id}/attention              Retrieve prioritised attention for an entity
 
 Ordering note
 -------------
@@ -20,9 +21,9 @@ so that FastAPI routes the literal path segment "mentions" correctly rather
 than treating it as a dynamic entity_id.
 
 Sub-resource routes (/{entity_id}/timeline, /{entity_id}/correlations,
-/{entity_id}/memory, /{entity_id}/insights) must also be declared BEFORE
+/{entity_id}/memory, /{entity_id}/insights, /{entity_id}/attention) must also be declared BEFORE
 /{entity_id} to prevent FastAPI from incorrectly matching 'timeline',
-'correlations', 'memory', or 'insights' as entity_id values.
+'correlations', 'memory', 'insights', or 'attention' as entity_id values.
 """
 
 import logging
@@ -69,6 +70,10 @@ from app.schemas.insights import (
     InsightTypeSchema,
     InsightSeveritySchema,
 )
+from app.schemas.attention import (
+    EntityAttentionDetailResponse,
+    EntityAttentionSchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -83,6 +88,7 @@ from app.services.correlation_service import CorrelationService
 from app.services.temporal_state_service import TemporalStateService
 from app.services.organisational_memory_service import OrganisationalMemoryService
 from app.services.insight_service import InsightService
+from app.services.attention_service import AttentionService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -238,6 +244,23 @@ def get_insight_service() -> InsightService:
     )
 
 
+def get_attention_service() -> AttentionService:
+    """FastAPI dependency that provides a configured AttentionService.
+
+    Uses the shared entity, mention, and meeting repository singletons plus
+    the default keyword-based interpreter and transition policy.
+    AttentionService internally composes InsightService.
+    All components are stateless and can be recreated freely.
+    """
+    return AttentionService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
@@ -353,6 +376,34 @@ def _insights_to_response(
         entity_id=entity_id,
         insight_count=len(insight_schemas),
         insights=insight_schemas,
+    )
+
+
+def _attention_to_entity_response(
+    entity_id: str,
+    attention,
+) -> EntityAttentionDetailResponse:
+    """Translate (entity_id, EntityAttention) to EntityAttentionDetailResponse."""
+    if attention is None:
+        return EntityAttentionDetailResponse(
+            entity_id=entity_id,
+            has_attention=False,
+            attention=None,
+        )
+
+    schema = EntityAttentionSchema(
+        attention_id=attention.attention_id,
+        entity_id=attention.entity_id,
+        attention_level=attention.attention_level.value,  # type: ignore[arg-type]
+        score=attention.score,
+        reasons=[r.value for r in attention.reasons],  # type: ignore[misc]
+        related_insight_ids=attention.related_insight_ids,
+        evaluated_at=attention.evaluated_at,
+    )
+    return EntityAttentionDetailResponse(
+        entity_id=entity_id,
+        has_attention=True,
+        attention=schema,
     )
 
 
@@ -685,6 +736,46 @@ def get_entity_insights(
             detail=str(exc),
         ) from exc
     return _insights_to_response(entity_id, insights)
+
+
+@router.get(
+    "/{entity_id}/attention",
+    response_model=EntityAttentionDetailResponse,
+    summary="Retrieve prioritised attention for an entity",
+    description=(
+        "Return the prioritised attention result for a specific canonical entity.\n\n"
+        "**This endpoint answers: 'Does the organisation need to pay attention to "
+        "this entity right now, and if so, why?'**\n\n"
+        "The Attention Engine aggregates all applicable signals (STALE_ENTITY, "
+        "REOPEN_ATTEMPT, ISSUE_BLOCKED, etc.) into a single numeric score and "
+        "priority level (CRITICAL, HIGH, MEDIUM, LOW).\n\n"
+        "**Rule F (Deduplication)**: Each reason (e.g. ENTITY_STALE) contributes to "
+        "the score at most once per entity, regardless of how many individual "
+        "observations trigger it.\n\n"
+        "**Rule E (No zero-score entities)**: If the entity has no actionable signals "
+        "(score = 0), `has_attention` is false and `attention` is null.\n\n"
+        "**Returns HTTP 200** when the entity exists, regardless of whether it "
+        "requires attention.\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_attention(
+    entity_id: str,
+    service: AttentionService = Depends(get_attention_service),
+) -> EntityAttentionDetailResponse:
+    """Return the prioritised attention result for a specific canonical entity."""
+    from datetime import datetime, timezone
+    try:
+        attention = service.get_entity_attention(
+            entity_id=entity_id,
+            current_time=datetime.now(timezone.utc),
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _attention_to_entity_response(entity_id, attention)
 
 
 @router.get(

@@ -15,10 +15,11 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Candidate Generation → Candidate Scoring → Resolution Decision
     → Cross-Meeting Correlation → Temporal State Engine
     → Organisational Memory → Insight & Change Detection
-    → Retrieval & AI Reasoning → Proactive Intelligence
+    → Prioritization & Attention Engine → Retrieval & AI Reasoning
+    → Proactive Intelligence
 ```
 
-**Today's implementation** covers the first nine stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), and the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks).
+**Today's implementation** covers the first ten stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks), and the **Prioritization & Attention Engine** (read-only aggregation of signals to identify critical entities).
 
 ---
 
@@ -1347,6 +1348,66 @@ GET /api/v1/entities/{entity_id}/insights
 
 ---
 
+## Prioritization & Attention Engine
+
+The Prioritization & Attention Engine is the **tenth stage** of the pipeline, sitting above the Insight & Change Detection Engine.
+
+It answers the operational question:
+
+> **"Does the organisation need to pay attention to this entity right now, and if so, why?"**
+
+### Why it exists
+
+While the Insight Engine tells us what changed, organizations need to know what to look at first. The Attention Engine aggregates all applicable signals (e.g. STALE_ENTITY, REOPEN_ATTEMPT, ISSUE_BLOCKED) into a single deterministic score and priority level (CRITICAL, HIGH, MEDIUM, LOW) for an entity.
+
+### Scoring and Deduplication
+
+The engine aggregates insights based on a deterministic scoring system:
+
+1. **Rule F (Deduplication)**: Each reason (e.g., `ENTITY_STALE`) contributes to the score at most once per entity, regardless of how many individual observations triggered it.
+2. **Rule E (No Zero-Score Entities)**: If an entity has no actionable signals (`score = 0`), it generates no attention record.
+3. **Deterministic Output**: The evaluation is 100% read-only. Calling it multiple times produces the identical result and the exact same `attention_id`.
+
+### Priority Levels
+
+- `CRITICAL`: score ≥ 100
+- `HIGH`: 50 ≤ score < 100
+- `MEDIUM`: 20 ≤ score < 50
+- `LOW`: 0 < score < 20
+
+### API endpoint
+
+```
+GET /api/v1/attention
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "entity_count": 1,
+  "items": [
+    {
+      "attention_id": "a1b2c3d4e5f60718",
+      "entity_id": "entity_001",
+      "attention_level": "CRITICAL",
+      "score": 120,
+      "reasons": [
+        "ENTITY_BLOCKED",
+        "RECENT_STATE_CHANGE"
+      ],
+      "related_insight_ids": [
+        "a3f9c1d2e4b50617",
+        "b7e2a0f3c91d4825"
+      ],
+      "evaluated_at": "2026-08-01T10:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -1354,7 +1415,8 @@ app/
 ├── main.py                              # FastAPI application entry point
 ├── api/
 │   ├── meetings.py                      # HTTP routing for meetings + extraction
-│   └── entities.py                      # HTTP routing for entities, mentions, candidates, resolution, correlation, timeline
+│   ├── entities.py                      # HTTP routing for entities, mentions, candidates, resolution, correlation, timeline
+│   └── attention.py                     # HTTP routing for top-level attention aggregation
 ├── models/
 │   ├── meeting.py                       # Internal meeting domain model
 │   ├── extraction.py                    # Internal extraction domain models
@@ -1364,7 +1426,8 @@ app/
 │   ├── correlation.py                   # EntityObservation, EntityCorrelation (read-models)
 │   ├── temporal.py                      # TemporalState, StateObservation, EntityTimeline (read-models)
 │   ├── memory.py                        # MemoryFactType, EntityMemoryFact, EntityMemory (read-models)
-│   └── insights.py                      # InsightType, InsightSeverity, EntityInsight (read-models)
+│   ├── insights.py                      # InsightType, InsightSeverity, EntityInsight (read-models)
+│   └── attention.py                     # AttentionLevel, AttentionReason, EntityAttention (read-models)
 ├── schemas/
 │   ├── meeting.py                       # Meeting API request/response schemas
 │   ├── extraction.py                    # Extraction API response schema
@@ -1372,7 +1435,8 @@ app/
 │   ├── correlation.py                   # Cross-meeting correlation API response schema
 │   ├── temporal.py                      # Temporal State Engine API response schema
 │   ├── memory.py                        # Organisational Memory API response schema
-│   └── insights.py                      # Insight & Change Detection API response schema
+│   ├── insights.py                      # Insight & Change Detection API response schema
+│   └── attention.py                     # Prioritization & Attention API response schema
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
@@ -1383,7 +1447,8 @@ app/
 │   ├── correlation_service.py           # Cross-meeting correlation (Stage 5, read-only)
 │   ├── temporal_state_service.py        # Temporal State Engine orchestration (Stage 6, read-only)
 │   ├── organisational_memory_service.py # Organisational Memory orchestration (Stage 7, read-only)
-│   └── insight_service.py               # Insight & Change Detection orchestration (Stage 8, read-only)
+│   ├── insight_service.py               # Insight & Change Detection orchestration (Stage 8, read-only)
+│   └── attention_service.py             # Prioritization & Attention orchestration (Stage 9, read-only)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -1418,7 +1483,8 @@ tests/
 ├── test_correlation.py                  # Cross-Meeting Correlation tests
 ├── test_temporal.py                     # Temporal State Engine tests (106 tests)
 ├── test_memory.py                       # Organisational Memory tests (14 tests)
-└── test_insights.py                     # Insight & Change Detection Engine tests (40 tests)
+├── test_insights.py                     # Insight & Change Detection Engine tests (40 tests)
+└── test_attention.py                    # Prioritization & Attention Engine tests (26+ tests)
 ```
 
 ---
