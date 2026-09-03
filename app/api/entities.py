@@ -11,6 +11,7 @@ GET    /entities                                     List entities (optional ?en
 GET    /entities/{entity_id}                         Retrieve a canonical entity by ID
 POST   /entities/mentions                            Register an entity mention (resolved or unresolved)
 GET    /entities/mentions/{mention_id}/candidates    Candidate generation for an unresolved mention
+GET    /entities/{entity_id}/insights               Retrieve derived insights for an entity
 
 Ordering note
 -------------
@@ -19,9 +20,9 @@ so that FastAPI routes the literal path segment "mentions" correctly rather
 than treating it as a dynamic entity_id.
 
 Sub-resource routes (/{entity_id}/timeline, /{entity_id}/correlations,
-/{entity_id}/memory) must also be declared BEFORE /{entity_id} to prevent
-FastAPI from incorrectly matching 'timeline', 'correlations', or 'memory'
-as entity_id values.
+/{entity_id}/memory, /{entity_id}/insights) must also be declared BEFORE
+/{entity_id} to prevent FastAPI from incorrectly matching 'timeline',
+'correlations', 'memory', or 'insights' as entity_id values.
 """
 
 import logging
@@ -62,6 +63,12 @@ from app.schemas.memory import (
     EntityMemoryFactSchema,
     MemoryFactTypeSchema,
 )
+from app.schemas.insights import (
+    EntityInsightsResponse,
+    EntityInsightSchema,
+    InsightTypeSchema,
+    InsightSeveritySchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -75,6 +82,7 @@ from app.services.resolution_service import (
 from app.services.correlation_service import CorrelationService
 from app.services.temporal_state_service import TemporalStateService
 from app.services.organisational_memory_service import OrganisationalMemoryService
+from app.services.insight_service import InsightService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -212,6 +220,24 @@ def get_organisational_memory_service() -> OrganisationalMemoryService:
     )
 
 
+def get_insight_service() -> InsightService:
+    """FastAPI dependency that provides a configured InsightService.
+
+    Uses the shared entity, mention, and meeting repository singletons plus
+    the default keyword-based interpreter and transition policy.
+    InsightService internally composes OrganisationalMemoryService and
+    TemporalStateService — all share the same stores.
+    All components are stateless and can be recreated freely.
+    """
+    return InsightService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
@@ -300,6 +326,33 @@ def _decision_to_response(decision) -> ResolutionDecisionResponse:
         second_score=decision.second_score,
         score_margin=decision.score_margin,
         reason=decision.reason,
+    )
+
+
+def _insights_to_response(
+    entity_id: str,
+    insights: list,
+) -> EntityInsightsResponse:
+    """Translate (entity_id, list[EntityInsight]) to EntityInsightsResponse."""
+    insight_schemas = [
+        EntityInsightSchema(
+            insight_id=i.insight_id,
+            entity_id=i.entity_id,
+            insight_type=InsightTypeSchema(i.insight_type.value),
+            title=i.title,
+            description=i.description,
+            severity=InsightSeveritySchema(i.severity.value),
+            observed_at=i.observed_at,
+            related_meeting_id=i.related_meeting_id,
+            evidence=i.evidence,
+            deterministic_sort_key=i.deterministic_sort_key,
+        )
+        for i in insights
+    ]
+    return EntityInsightsResponse(
+        entity_id=entity_id,
+        insight_count=len(insight_schemas),
+        insights=insight_schemas,
     )
 
 
@@ -580,6 +633,58 @@ def list_entities(
     domain_type = EntityType(entity_type.value) if entity_type is not None else None
     entities = service.list_entities(entity_type=domain_type)
     return [_entity_to_response(e) for e in entities]
+
+
+@router.get(
+    "/{entity_id}/insights",
+    response_model=EntityInsightsResponse,
+    summary="Retrieve derived insights for an entity",
+    description=(
+        "Return all derived insights for a canonical entity: actionable intelligence "
+        "computed deterministically from the entity's temporal lifecycle history and "
+        "organisational memory.\n\n"
+        "**This endpoint answers: 'What changed for this entity, and which changes "
+        "are important?'**\n\n"
+        "**Insight types:**\n"
+        "- **STATE_CHANGED**: entity moved from one valid state to another.\n"
+        "- **ISSUE_BLOCKED**: entity entered BLOCKED state (in addition to STATE_CHANGED).\n"
+        "- **ISSUE_RESOLVED**: entity entered RESOLVED state (in addition to STATE_CHANGED).\n"
+        "- **REOPEN_ATTEMPT**: observation tried to reopen a RESOLVED entity (state unchanged).\n"
+        "- **REPEATED_OBSERVATION**: entity observed multiple times in one meeting without progress.\n"
+        "- **UNKNOWN_STATE**: entity has observations but no state-bearing evidence.\n"
+        "- **STALE_ENTITY**: entity not observed for >= 30 days and not RESOLVED.\n\n"
+        "**Severity mapping (deterministic):**\n"
+        "- INFO: STATE_CHANGED, ISSUE_RESOLVED, REPEATED_OBSERVATION, UNKNOWN_STATE.\n"
+        "- WARNING: ISSUE_BLOCKED, REOPEN_ATTEMPT, STALE_ENTITY.\n\n"
+        "**Determinism**: the same repository state always produces the same insights "
+        "in the same order.  Running this endpoint multiple times is idempotent.\n\n"
+        "**Ordering**: (observed_at ASC, entity_id ASC, insight_type ASC, insight_id ASC).\n\n"
+        "**Read-only guarantees:**\n"
+        "- Only RESOLVED mentions participate (via Temporal State Engine).\n"
+        "- This endpoint never creates or modifies entities, mentions, or resolution state.\n"
+        "- It never re-runs extraction, candidate generation, scoring, or resolution.\n\n"
+        "**Returns HTTP 200** with insight_count=0 and insights=[] when the entity "
+        "exists but has no applicable insights.\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_insights(
+    entity_id: str,
+    service: InsightService = Depends(get_insight_service),
+) -> EntityInsightsResponse:
+    """Return derived insights for a canonical entity."""
+    from datetime import datetime, timezone
+    try:
+        insights = service.get_entity_insights(
+            entity_id=entity_id,
+            current_time=datetime.now(timezone.utc),
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _insights_to_response(entity_id, insights)
 
 
 @router.get(
