@@ -74,6 +74,12 @@ from app.schemas.attention import (
     EntityAttentionDetailResponse,
     EntityAttentionSchema,
 )
+from app.schemas.actions import (
+    EntityActionsResponse,
+    EntityActionSchema,
+    ActionTypeSchema,
+    ActionPrioritySchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -89,6 +95,7 @@ from app.services.temporal_state_service import TemporalStateService
 from app.services.organisational_memory_service import OrganisationalMemoryService
 from app.services.insight_service import InsightService
 from app.services.attention_service import AttentionService
+from app.services.action_recommendation_service import ActionRecommendationService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -261,6 +268,20 @@ def get_attention_service() -> AttentionService:
     )
 
 
+def get_action_recommendation_service() -> ActionRecommendationService:
+    """FastAPI dependency that provides a configured ActionRecommendationService.
+
+    Uses the shared repository singletons and interpreter/policy.
+    """
+    return ActionRecommendationService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
@@ -404,6 +425,33 @@ def _attention_to_entity_response(
         entity_id=entity_id,
         has_attention=True,
         attention=schema,
+    )
+
+
+def _actions_to_response(
+    entity_id: str,
+    actions: list,
+) -> EntityActionsResponse:
+    """Translate (entity_id, list[EntityAction]) to EntityActionsResponse."""
+    action_schemas = [
+        EntityActionSchema(
+            action_id=a.action_id,
+            entity_id=a.entity_id,
+            action_type=ActionTypeSchema(a.action_type.value),
+            priority=ActionPrioritySchema(a.priority.value),
+            recommended_action=a.recommended_action,
+            reason=a.reason,
+            related_insight_ids=a.related_insight_ids,
+            related_meeting_id=a.related_meeting_id,
+            created_from_observation_at=a.created_from_observation_at,
+            deterministic_sort_key=a.deterministic_sort_key,
+        )
+        for a in actions
+    ]
+    return EntityActionsResponse(
+        entity_id=entity_id,
+        action_count=len(action_schemas),
+        actions=action_schemas,
     )
 
 
@@ -776,6 +824,44 @@ def get_entity_attention(
             detail=str(exc),
         ) from exc
     return _attention_to_entity_response(entity_id, attention)
+
+
+@router.get(
+    "/{entity_id}/actions",
+    response_model=EntityActionsResponse,
+    summary="Retrieve recommended actions for an entity",
+    description=(
+        "Return the recommended next actions for a specific canonical entity.\n\n"
+        "**This endpoint answers: 'What should we do next regarding this entity?'**\n\n"
+        "The Action Recommendation Engine derives actions from the entity's Prioritization "
+        "and Attention signals.\n\n"
+        "**Rules:**\n"
+        "- BLOCKED/HIGH ATTENTION → ESCALATE\n"
+        "- STALE ENTITY → REQUEST_UPDATE\n"
+        "- REOPEN ATTEMPT → INVESTIGATE\n"
+        "- REPEATED OBSERVATIONS → FOLLOW_UP\n"
+        "- SIGNIFICANT STATE CHANGE → REVIEW\n\n"
+        "**Returns HTTP 200** with an empty list if no action is required.\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_actions(
+    entity_id: str,
+    service: ActionRecommendationService = Depends(get_action_recommendation_service),
+) -> EntityActionsResponse:
+    """Return the recommended actions for a specific canonical entity."""
+    from datetime import datetime, timezone
+    try:
+        actions = service.get_entity_actions(
+            entity_id=entity_id,
+            current_time=datetime.now(timezone.utc),
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _actions_to_response(entity_id, actions)
 
 
 @router.get(
