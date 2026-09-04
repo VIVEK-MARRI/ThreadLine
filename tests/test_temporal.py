@@ -1042,7 +1042,7 @@ def _register_and_resolve_mention(
 # A01 — Unknown entity → 404
 
 def test_a01_unknown_entity_returns_404(client):
-    resp = client.get("/api/v1/entities/nonexistent_entity_id/timeline")
+    resp = client.get("/api/v1/entities/nonexistent_entity_id/temporal")
     assert resp.status_code == 404
 
 
@@ -1051,7 +1051,7 @@ def test_a01_unknown_entity_returns_404(client):
 def test_a02_entity_no_mentions_returns_200_empty(timeline_client):
     client, entity_repo, mention_repo, meeting_repo = timeline_client
     entity_repo.create(_make_entity("e_api2", "Payment API Bug"))
-    resp = client.get("/api/v1/entities/e_api2/timeline")
+    resp = client.get("/api/v1/entities/e_api2/temporal")
     assert resp.status_code == 200
     data = resp.json()
     assert data["entity_id"] == "e_api2"
@@ -1071,7 +1071,7 @@ def test_a03_valid_entity_with_observations_returns_200(timeline_client):
         "mn_api3", "e_api3", "m_api3",
         "The Payment API Bug has started being fixed."
     ))
-    resp = client.get("/api/v1/entities/e_api3/timeline")
+    resp = client.get("/api/v1/entities/e_api3/temporal")
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["timeline"]) == 1
@@ -1082,7 +1082,7 @@ def test_a03_valid_entity_with_observations_returns_200(timeline_client):
 def test_a04_response_has_required_fields(timeline_client):
     client, entity_repo, *_ = timeline_client
     entity_repo.create(_make_entity("e_api4", "Login Failure"))
-    resp = client.get("/api/v1/entities/e_api4/timeline")
+    resp = client.get("/api/v1/entities/e_api4/temporal")
     data = resp.json()
     required = {"entity_id", "canonical_name", "entity_type", "current_state",
                 "observation_count", "transition_count", "timeline"}
@@ -1099,7 +1099,7 @@ def test_a05_current_state_correct(timeline_client):
         "mn_api5", "e_api5", "m_api5",
         "The Login Failure issue has been resolved and closed."
     ))
-    resp = client.get("/api/v1/entities/e_api5/timeline")
+    resp = client.get("/api/v1/entities/e_api5/temporal")
     data = resp.json()
     assert data["current_state"] == "RESOLVED"
 
@@ -1115,7 +1115,7 @@ def test_a06_timeline_chronologically_ordered(timeline_client):
     mention_repo.create(_make_resolved_mention("mn_api6a", "e_api6", "m_api6a", "Auth Bug identified."))
     mention_repo.create(_make_resolved_mention("mn_api6b", "e_api6", "m_api6b", "Auth Bug started being fixed."))
     mention_repo.create(_make_resolved_mention("mn_api6c", "e_api6", "m_api6c", "Auth Bug resolved."))
-    resp = client.get("/api/v1/entities/e_api6/timeline")
+    resp = client.get("/api/v1/entities/e_api6/temporal")
     data = resp.json()
     dates = [entry["meeting_date"] for entry in data["timeline"]]
     assert dates == sorted(dates)
@@ -1130,7 +1130,7 @@ def test_a07_observation_count_matches_timeline_len(timeline_client):
     meeting_repo.save(_make_meeting("m_api7b", "M2", offset_days=7))
     mention_repo.create(_make_resolved_mention("mn_api7a", "e_api7", "m_api7a", "DB Error started."))
     mention_repo.create(_make_resolved_mention("mn_api7b", "e_api7", "m_api7b", "DB Error resolved."))
-    resp = client.get("/api/v1/entities/e_api7/timeline")
+    resp = client.get("/api/v1/entities/e_api7/temporal")
     data = resp.json()
     assert data["observation_count"] == len(data["timeline"])
 
@@ -1144,7 +1144,7 @@ def test_a08_transition_count_correct(timeline_client):
     meeting_repo.save(_make_meeting("m_api8b", "M2", offset_days=7))
     mention_repo.create(_make_resolved_mention("mn_api8a", "e_api8", "m_api8a", "Cache Bug started."))
     mention_repo.create(_make_resolved_mention("mn_api8b", "e_api8", "m_api8b", "Cache Bug resolved."))
-    resp = client.get("/api/v1/entities/e_api8/timeline")
+    resp = client.get("/api/v1/entities/e_api8/temporal")
     data = resp.json()
     expected_transitions = sum(1 for e in data["timeline"] if e["transition_occurred"])
     assert data["transition_count"] == expected_transitions
@@ -1159,7 +1159,7 @@ def test_a09_each_entry_has_required_fields(timeline_client):
     mention_repo.create(_make_resolved_mention(
         "mn_api9", "e_api9", "m_api9", "Network Issue started being investigated."
     ))
-    resp = client.get("/api/v1/entities/e_api9/timeline")
+    resp = client.get("/api/v1/entities/e_api9/temporal")
     data = resp.json()
     assert len(data["timeline"]) >= 1
     entry = data["timeline"][0]
@@ -1179,7 +1179,7 @@ def test_a10_is_valid_transition_field_present_in_response(timeline_client):
     entity_repo.create(_make_entity("e_api10", "Quota Issue"))
     meeting_repo.save(_make_meeting("m_api10", "M1", offset_days=0))
     mention_repo.create(_make_resolved_mention("mn_api10", "e_api10", "m_api10", "Quota Issue resolved."))
-    resp = client.get("/api/v1/entities/e_api10/timeline")
+    resp = client.get("/api/v1/entities/e_api10/temporal")
     data = resp.json()
     entry = data["timeline"][0]
     assert "is_valid_transition" in entry
@@ -1196,7 +1196,7 @@ def test_a11_invalid_transition_recorded(timeline_client):
     meeting_repo.save(_make_meeting("m_api11b", "M2", offset_days=7))
     mention_repo.create(_make_resolved_mention("mn_api11a", "e_api11", "m_api11a", "Retry Bug resolved."))
     mention_repo.create(_make_resolved_mention("mn_api11b", "e_api11", "m_api11b", "Started working again."))
-    resp = client.get("/api/v1/entities/e_api11/timeline")
+    resp = client.get("/api/v1/entities/e_api11/temporal")
     data = resp.json()
     assert len(data["timeline"]) == 2
     assert data["timeline"][0]["is_valid_transition"] is True
@@ -1211,7 +1211,7 @@ def test_a12_transition_skipped_reason_null_for_valid(timeline_client):
     entity_repo.create(_make_entity("e_api12", "Quota Issue 2"))
     meeting_repo.save(_make_meeting("m_api12", "M1", offset_days=0))
     mention_repo.create(_make_resolved_mention("mn_api12", "e_api12", "m_api12", "The issue started."))
-    resp = client.get("/api/v1/entities/e_api12/timeline")
+    resp = client.get("/api/v1/entities/e_api12/temporal")
     data = resp.json()
     entry = data["timeline"][0]
     assert entry["is_valid_transition"] is True
@@ -1230,7 +1230,7 @@ def test_a13_from_state_and_to_state_correct(timeline_client):
         # "started being fixed" triggers RESOLVED due to "fixed" having higher priority.
         "We are currently working on the Rate Limit Bug."
     ))
-    resp = client.get("/api/v1/entities/e_api13/timeline")
+    resp = client.get("/api/v1/entities/e_api13/temporal")
     data = resp.json()
     entry = data["timeline"][0]
     assert entry["from_state"] == "UNKNOWN"
@@ -1246,7 +1246,7 @@ def test_a14_evidence_text_matches_source_text(timeline_client):
     meeting_repo.save(_make_meeting("m_api14", "M1", offset_days=0))
     source = "The TLS Error is now being resolved and closed by the security team."
     mention_repo.create(_make_resolved_mention("mn_api14", "e_api14", "m_api14", source))
-    resp = client.get("/api/v1/entities/e_api14/timeline")
+    resp = client.get("/api/v1/entities/e_api14/temporal")
     data = resp.json()
     assert data["timeline"][0]["evidence_text"] == source
 
@@ -1267,7 +1267,7 @@ def test_a15_person_entity_returns_unknown(timeline_client):
         resolution_status=ResolutionStatus.RESOLVED,
         created_at=_BASE_TIME,
     ))
-    resp = client.get("/api/v1/entities/e_api15/timeline")
+    resp = client.get("/api/v1/entities/e_api15/temporal")
     data = resp.json()
     # PERSON entity with no lifecycle keywords → UNKNOWN
     assert data["current_state"] == "UNKNOWN"

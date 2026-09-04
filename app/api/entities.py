@@ -80,6 +80,11 @@ from app.schemas.actions import (
     ActionTypeSchema,
     ActionPrioritySchema,
 )
+from app.schemas.unified_timeline import (
+    UnifiedEntityTimelineResponse,
+    TimelineEventSchema,
+    TimelineEventTypeSchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -96,6 +101,7 @@ from app.services.organisational_memory_service import OrganisationalMemoryServi
 from app.services.insight_service import InsightService
 from app.services.attention_service import AttentionService
 from app.services.action_recommendation_service import ActionRecommendationService
+from app.services.unified_timeline_service import UnifiedTimelineService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -282,6 +288,17 @@ def get_action_recommendation_service() -> ActionRecommendationService:
     )
 
 
+def get_unified_timeline_service() -> UnifiedTimelineService:
+    """FastAPI dependency that provides a configured UnifiedTimelineService."""
+    return UnifiedTimelineService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
@@ -452,6 +469,32 @@ def _actions_to_response(
         entity_id=entity_id,
         action_count=len(action_schemas),
         actions=action_schemas,
+    )
+
+
+def _unified_timeline_to_response(
+    timeline
+) -> UnifiedEntityTimelineResponse:
+    """Translate a UnifiedEntityTimeline domain model to API response schema."""
+    event_schemas = [
+        TimelineEventSchema(
+            event_id=e.event_id,
+            entity_id=e.entity_id,
+            event_type=TimelineEventTypeSchema(e.event_type.value),
+            occurred_at=e.occurred_at,
+            related_meeting_id=e.related_meeting_id,
+            title=e.title,
+            description=e.description,
+            event_metadata=e.event_metadata,
+        )
+        for e in timeline.events
+    ]
+    return UnifiedEntityTimelineResponse(
+        entity_id=timeline.entity_id,
+        first_observed_at=timeline.first_observed_at,
+        last_observed_at=timeline.last_observed_at,
+        event_count=len(event_schemas),
+        events=event_schemas,
     )
 
 
@@ -865,6 +908,37 @@ def get_entity_actions(
 
 
 @router.get(
+    "/{entity_id}/timeline",
+    response_model=UnifiedEntityTimelineResponse,
+    summary="Retrieve the unified chronological timeline for an entity",
+    description=(
+        "Return the complete chronological story for a specific canonical entity.\n\n"
+        "**This endpoint answers: 'What is the complete story of this entity?'**\n\n"
+        "It aggregates existing outputs from observations, state transitions, memory facts, "
+        "insights, attention, and actions into a deterministic timeline.\n\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_timeline(
+    entity_id: str,
+    service: UnifiedTimelineService = Depends(get_unified_timeline_service),
+) -> UnifiedEntityTimelineResponse:
+    """Return the unified chronological timeline for a specific canonical entity."""
+    from datetime import datetime, timezone
+    try:
+        timeline = service.get_unified_timeline(
+            entity_id=entity_id,
+            current_time=datetime.now(timezone.utc),
+        )
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _unified_timeline_to_response(timeline)
+
+
+@router.get(
     "/{entity_id}/memory",
     response_model=EntityMemoryResponse,
     summary="Retrieve the organisational memory record for an entity",
@@ -908,7 +982,7 @@ def get_entity_memory(
 
 
 @router.get(
-    "/{entity_id}/timeline",
+    "/{entity_id}/temporal",
     response_model=EntityTimelineResponse,
     summary="Retrieve the temporal lifecycle timeline for an entity",
     description=(

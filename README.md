@@ -15,8 +15,8 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Candidate Generation → Candidate Scoring → Resolution Decision
     → Cross-Meeting Correlation → Temporal State Engine
     → Organisational Memory → Insight & Change Detection
-    → Prioritization & Attention Engine → Retrieval & AI Reasoning
-    → Proactive Intelligence
+    → Prioritization & Attention Engine → Action Recommendation
+    → Unified Entity Timeline → Proactive Intelligence
 ```
 
 **Today's implementation** covers the first ten stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks), and the **Prioritization & Attention Engine** (read-only aggregation of signals to identify critical entities).
