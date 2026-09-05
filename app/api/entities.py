@@ -21,11 +21,12 @@ so that FastAPI routes the literal path segment "mentions" correctly rather
 than treating it as a dynamic entity_id.
 
 Sub-resource routes (/{entity_id}/timeline, /{entity_id}/correlations,
-/{entity_id}/memory, /{entity_id}/insights, /{entity_id}/attention) must also be declared BEFORE
+/{entity_id}/memory, /{entity_id}/insights, /{entity_id}/attention, /{entity_id}/impacts) must also be declared BEFORE
 /{entity_id} to prevent FastAPI from incorrectly matching 'timeline',
-'correlations', 'memory', 'insights', or 'attention' as entity_id values.
+'correlations', 'memory', 'insights', 'attention', or 'impacts' as entity_id values.
 """
 
+from datetime import datetime, timezone
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -91,6 +92,12 @@ from app.schemas.relationships import (
     RelationshipTypeSchema,
     RelationshipEvidenceTypeSchema,
 )
+from app.schemas.impact import (
+    EntityImpactResponse,
+    EntityImpactSchema,
+    ImpactLevel,
+    RiskSignalType,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -109,6 +116,7 @@ from app.services.attention_service import AttentionService
 from app.services.action_recommendation_service import ActionRecommendationService
 from app.services.unified_timeline_service import UnifiedTimelineService
 from app.services.entity_relationship_service import EntityRelationshipService
+from app.services.impact_analysis_service import ImpactAnalysisService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -311,6 +319,17 @@ def get_entity_relationship_service() -> EntityRelationshipService:
     return EntityRelationshipService(
         entity_repo=_entity_repository,
         mention_repo=_mention_repository,
+    )
+
+
+def get_impact_analysis_service() -> ImpactAnalysisService:
+    """FastAPI dependency that provides a configured ImpactAnalysisService."""
+    return ImpactAnalysisService(
+        entity_repo=_entity_repository,
+        relationship_service=get_entity_relationship_service(),
+        temporal_service=get_temporal_state_service(),
+        insight_service=get_insight_service(),
+        attention_service=get_attention_service(),
     )
 
 
@@ -612,6 +631,30 @@ def _relationship_graph_to_response(graph) -> EntityRelationshipGraphResponse:
         relationship_count=graph.relationship_count,
         related_entity_ids=graph.related_entity_ids,
         relationships=rel_schemas,
+    )
+
+
+def _impacts_to_response(entity_id: str, impacts: list) -> EntityImpactResponse:
+    """Translate list[EntityImpact] domain models to API response schema."""
+    impact_schemas = [
+        EntityImpactSchema(
+            impact_id=i.impact_id,
+            source_entity_id=i.source_entity_id,
+            impacted_entity_id=i.impacted_entity_id,
+            impact_level=ImpactLevel(i.impact_level.value),
+            risk_signals=[RiskSignalType(rs.value) for rs in i.risk_signals],
+            relationship_strength=i.relationship_strength,
+            related_meeting_ids=i.related_meeting_ids,
+            reason=i.reason,
+            generated_from_at=i.generated_from_at,
+            deterministic_sort_key=i.deterministic_sort_key,
+        )
+        for i in impacts
+    ]
+    return EntityImpactResponse(
+        entity_id=entity_id,
+        impact_count=len(impact_schemas),
+        impacts=impact_schemas,
     )
 
 
@@ -1130,6 +1173,35 @@ def get_entity_relationships(
             detail=str(exc),
         ) from exc
     return _relationship_graph_to_response(graph)
+
+
+@router.get(
+    "/{entity_id}/impacts",
+    response_model=EntityImpactResponse,
+    summary="Retrieve cross-entity risk propagation impacts",
+    description=(
+        "Return the risk impact associations directed at a specific canonical entity.\n\n"
+        "**This endpoint answers: 'What risks from other associated entities are "
+        "impacting this entity?'**\n\n"
+        "Impacts are inferred deterministically from CO_OCCURS_WITH relationships "
+        "and risk signals (Attention, Insights, Temporal State).\n\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_impacts(
+    entity_id: str,
+    service: ImpactAnalysisService = Depends(get_impact_analysis_service),
+) -> EntityImpactResponse:
+    """Return the risk impact associations directed at a canonical entity."""
+    current_time = datetime.now(timezone.utc)
+    try:
+        impacts = service.get_entity_impacts(entity_id=entity_id, current_time=current_time)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _impacts_to_response(entity_id, impacts)
 
 
 @router.get(

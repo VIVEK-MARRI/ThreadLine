@@ -16,10 +16,11 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Cross-Meeting Correlation → Temporal State Engine
     → Organisational Memory → Insight & Change Detection
     → Prioritization & Attention Engine → Action Recommendation
-    → Unified Entity Timeline → Proactive Intelligence
+    → Unified Entity Timeline → Entity Relationship Intelligence
+    → Cross-Entity Risk Propagation & Impact Analysis (Proactive Intelligence)
 ```
 
-**Today's implementation** covers the first ten stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks), and the **Prioritization & Attention Engine** (read-only aggregation of signals to identify critical entities).
+**Today's implementation** covers the first thirteen stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks), the **Prioritization & Attention Engine** (read-only aggregation of signals to identify critical entities), the **Entity Relationship Engine** (inferring relationships between canonical entities), and the **Impact Analysis Engine** (propagating risk across relationships).
 
 ---
 
@@ -1460,6 +1461,62 @@ curl http://localhost:8000/api/v1/entities/{entity_id}/relationships
 
 ---
 
+## Cross-Entity Risk Propagation & Impact Analysis (Stage 13)
+
+The Impact Analysis Engine builds on top of the Relationship Engine, Temporal State Engine, Insight Engine, and Attention Engine. It determines how risks and delays on one entity (the source) impact other entities (the impacted entity) that they co-occur with.
+
+It answers: **"How is this entity impacted by the state of its related entities?"**
+
+### Principles & Rules
+
+1. **Read-Only**: The engine operates as a purely read-only layer over existing relationships and signals. It does not modify entities.
+2. **Deterministic Sort Key**: Impacts are deterministically sorted by severity, relationship strength, and entity IDs.
+3. **No Fabricated Dependencies**: The system infers non-causal impacts. The reasons explicitly state that the entities co-occur, avoiding hallucinated dependency claims.
+4. **Signal Propagation Mapping**:
+   - `BLOCKED_ENTITY` -> HIGH impact
+   - `CRITICAL_ATTENTION` + strong relationship -> CRITICAL impact
+   - `CRITICAL_ATTENTION` + weak relationship -> HIGH impact
+   - `HIGH_ATTENTION` + strong relationship -> HIGH impact
+   - `HIGH_ATTENTION` + weak relationship -> MEDIUM impact
+   - `REOPEN_ATTEMPT` -> MEDIUM impact
+   - `STALE_ENTITY` -> LOW impact
+
+### Calling the impacts endpoint
+
+```bash
+curl http://localhost:8000/api/v1/entities/{entity_id}/impacts
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "entity_id": "e1a2b3c4-...",
+  "impact_count": 1,
+  "impacts": [
+    {
+      "impact_id": "d748f3b0-...",
+      "source_entity_id": "e9z8y7x6-...",
+      "impacted_entity_id": "e1a2b3c4-...",
+      "impact_level": "HIGH",
+      "risk_signals": [
+        "BLOCKED_ENTITY",
+        "STALE_ENTITY"
+      ],
+      "relationship_strength": 1,
+      "related_meeting_ids": [
+        "m_001"
+      ],
+      "reason": "The impacted entity is associated with an entity that is currently BLOCKED.",
+      "generated_from_at": "2026-09-05T10:00:00Z",
+      "deterministic_sort_key": "3_000001_e9z8y7x6-..._e1a2b3c4-..._d748f3b0-..."
+    }
+  ]
+}
+```
+
+---
+
 ## Project Structure
 
 
@@ -1489,7 +1546,8 @@ app/
 │   ├── temporal.py                      # Temporal State Engine API response schema
 │   ├── memory.py                        # Organisational Memory API response schema
 │   ├── insights.py                      # Insight & Change Detection API response schema
-│   └── attention.py                     # Prioritization & Attention API response schema
+│   ├── attention.py                     # Prioritization & Attention API response schema
+│   └── impact.py                        # Cross-Entity Impact Analysis API response schema
 ├── services/
 │   ├── meeting_service.py               # Meeting business logic
 │   ├── extraction_service.py            # Extraction orchestration
@@ -1501,7 +1559,8 @@ app/
 │   ├── temporal_state_service.py        # Temporal State Engine orchestration (Stage 6, read-only)
 │   ├── organisational_memory_service.py # Organisational Memory orchestration (Stage 7, read-only)
 │   ├── insight_service.py               # Insight & Change Detection orchestration (Stage 8, read-only)
-│   └── attention_service.py             # Prioritization & Attention orchestration (Stage 9, read-only)
+│   ├── attention_service.py             # Prioritization & Attention orchestration (Stage 9, read-only)
+│   └── impact_analysis_service.py       # Cross-Entity Risk Propagation orchestration (Stage 13, read-only)
 ├── repositories/
 │   ├── meeting_repository.py            # Meeting storage abstraction
 │   ├── extraction_repository.py         # Extraction result storage abstraction
@@ -1537,7 +1596,8 @@ tests/
 ├── test_temporal.py                     # Temporal State Engine tests (106 tests)
 ├── test_memory.py                       # Organisational Memory tests (14 tests)
 ├── test_insights.py                     # Insight & Change Detection Engine tests (40 tests)
-└── test_attention.py                    # Prioritization & Attention Engine tests (26+ tests)
+├── test_attention.py                    # Prioritization & Attention Engine tests (26+ tests)
+└── test_impact.py                       # Cross-Entity Risk Propagation Engine tests
 ```
 
 ---
