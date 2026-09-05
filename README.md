@@ -1408,7 +1408,60 @@ GET /api/v1/attention
 
 ---
 
+## Entity Relationship & Dependency Intelligence Engine (Stage 12)
+
+The Entity Relationship Engine moves ThreadLine from entity-level intelligence to organisation-level intelligence by deterministically inferring relationships between canonical entities.
+
+It answers: **"How are these entities connected, and what is the strength of that connection?"**
+
+### Principles & Rules
+
+1. **Deterministic Inference**: Relationships are inferred purely from evidence present in the system (e.g., meeting co-occurrence). No LLM calls or probabilistic models are used in this stage.
+2. **Read-Only**: The engine operates purely as a read-model on top of existing `RESOLVED` mentions and entities. It never creates, modifies, or deletes entities or mentions.
+3. **No Fabricated Dependencies**: While the long-term goal is to extract dependencies (e.g., `BLOCKS`, `BLOCKED_BY`), the current system lacks deterministic evidence for this. Therefore, the engine only infers `CO_OCCURS_WITH` relationships based on shared meetings.
+4. **Symmetry & Deduplication**: `CO_OCCURS_WITH` relationships are undirected. The system guarantees a stable, deduplicated canonical edge regardless of which entity is queried (source is always the alphabetically smaller `entity_id`).
+5. **Strength Weighting**: The strength of a relationship is the distinct number of meetings in which two entities co-occur. Multiple mentions in the same meeting only count as 1 co-occurrence.
+6. **No Self-Loops**: An entity co-occurring with itself in a meeting does not produce a relationship.
+
+### Calling the relationships endpoint
+
+```bash
+curl http://localhost:8000/api/v1/entities/{entity_id}/relationships
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "entity_id": "e1a2b3c4-...",
+  "relationship_count": 1,
+  "related_entity_ids": [
+    "e9z8y7x6-..."
+  ],
+  "relationships": [
+    {
+      "relationship_id": "d748f3b0-...",
+      "source_entity_id": "e1a2b3c4-...",
+      "target_entity_id": "e9z8y7x6-...",
+      "relationship_type": "CO_OCCURS_WITH",
+      "evidence_type": "CO_OCCURRENCE",
+      "evidence": "Entities co-occurred in 3 meeting(s).",
+      "related_meeting_ids": [
+        "m_001",
+        "m_002",
+        "m_003"
+      ],
+      "strength": 3,
+      "deterministic_sort_key": "000003_CO_OCCURS_WITH_e9z8y7x6-..._d748f3b0-..."
+    }
+  ]
+}
+```
+
+---
+
 ## Project Structure
+
 
 ```
 app/

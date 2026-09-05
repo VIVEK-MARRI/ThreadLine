@@ -85,6 +85,12 @@ from app.schemas.unified_timeline import (
     TimelineEventSchema,
     TimelineEventTypeSchema,
 )
+from app.schemas.relationships import (
+    EntityRelationshipGraphResponse,
+    EntityRelationshipSchema,
+    RelationshipTypeSchema,
+    RelationshipEvidenceTypeSchema,
+)
 from app.services.candidate_service import CandidateService, MentionNotFoundError
 from app.services.candidate_scoring_service import (
     CandidateScoringService,
@@ -102,6 +108,7 @@ from app.services.insight_service import InsightService
 from app.services.attention_service import AttentionService
 from app.services.action_recommendation_service import ActionRecommendationService
 from app.services.unified_timeline_service import UnifiedTimelineService
+from app.services.entity_relationship_service import EntityRelationshipService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -296,6 +303,14 @@ def get_unified_timeline_service() -> UnifiedTimelineService:
         meeting_repo=_get_shared_meeting_repository(),
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
+    )
+
+
+def get_entity_relationship_service() -> EntityRelationshipService:
+    """FastAPI dependency that provides a configured EntityRelationshipService."""
+    return EntityRelationshipService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
     )
 
 
@@ -573,6 +588,30 @@ def _correlation_to_response(correlation) -> EntityCorrelationResponse:
         entity_type=EntityTypeSchema(correlation.entity_type.value),
         observation_count=len(observation_schemas),
         observations=observation_schemas,
+    )
+
+
+def _relationship_graph_to_response(graph) -> EntityRelationshipGraphResponse:
+    """Translate an EntityRelationshipGraph domain model to API response schema."""
+    rel_schemas = [
+        EntityRelationshipSchema(
+            relationship_id=r.relationship_id,
+            source_entity_id=r.source_entity_id,
+            target_entity_id=r.target_entity_id,
+            relationship_type=RelationshipTypeSchema(r.relationship_type.value),
+            evidence_type=RelationshipEvidenceTypeSchema(r.evidence_type.value),
+            evidence=r.evidence,
+            related_meeting_ids=r.related_meeting_ids,
+            strength=r.strength,
+            deterministic_sort_key=r.deterministic_sort_key,
+        )
+        for r in graph.relationships
+    ]
+    return EntityRelationshipGraphResponse(
+        entity_id=graph.entity_id,
+        relationship_count=graph.relationship_count,
+        related_entity_ids=graph.related_entity_ids,
+        relationships=rel_schemas,
     )
 
 
@@ -1063,6 +1102,34 @@ def get_entity_correlations(
             detail=str(exc),
         ) from exc
     return _correlation_to_response(correlation)
+
+
+@router.get(
+    "/{entity_id}/relationships",
+    response_model=EntityRelationshipGraphResponse,
+    summary="Retrieve the relationship graph for an entity",
+    description=(
+        "Return the relationship intelligence graph for a specific canonical entity.\n\n"
+        "**This endpoint answers: 'What entities are related to this entity?'**\n\n"
+        "It currently infers relationships based solely on deterministic meeting "
+        "co-occurrence (CO_OCCURS_WITH). Explicit dependencies (e.g., BLOCKS) "
+        "are not supported as the ingestion data lacks deterministic evidence.\n\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_relationships(
+    entity_id: str,
+    service: EntityRelationshipService = Depends(get_entity_relationship_service),
+) -> EntityRelationshipGraphResponse:
+    """Return the relationship graph for a specific canonical entity."""
+    try:
+        graph = service.get_relationship_graph(entity_id=entity_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _relationship_graph_to_response(graph)
 
 
 @router.get(
