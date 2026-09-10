@@ -333,6 +333,27 @@ def get_impact_analysis_service() -> ImpactAnalysisService:
     )
 
 
+def get_portfolio_intelligence_service():
+    """FastAPI dependency that provides a configured PortfolioIntelligenceService.
+
+    Uses the shared entity, mention, and meeting repository singletons plus
+    the default keyword-based interpreter and transition policy.
+    PortfolioIntelligenceService internally composes AttentionService,
+    InsightService, ActionRecommendationService, TemporalStateService, and
+    ImpactAnalysisService — all sharing the same underlying repositories.
+    All components are stateless and can be recreated freely.
+    """
+    from app.services.portfolio_intelligence_service import PortfolioIntelligenceService
+
+    return PortfolioIntelligenceService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        meeting_repo=_get_shared_meeting_repository(),
+        interpreter=KeywordStateInterpreter(),
+        policy=DefaultTransitionPolicy(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Translation helpers
 # (Domain model → API response schema — keeps endpoint handlers thin.)
