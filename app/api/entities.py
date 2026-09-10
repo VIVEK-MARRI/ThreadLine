@@ -39,6 +39,7 @@ from app.models.entity import (
 )
 from app.repositories.entity_repository import InMemoryEntityRepository
 from app.repositories.mention_repository import InMemoryMentionRepository
+from app.repositories.dependency_repository import InMemoryDependencyRepository
 from app.entity_resolution.lexical_candidate_generator import LexicalCandidateGenerator
 from app.schemas.entity import (
     CandidatesResponse,
@@ -130,6 +131,7 @@ router = APIRouter(prefix="/entities", tags=["Entities"])
 # ---------------------------------------------------------------------------
 _entity_repository = InMemoryEntityRepository()
 _mention_repository = InMemoryMentionRepository()
+_dependency_repository = InMemoryDependencyRepository()
 
 # Shared meeting repository — imported from the meetings router so that
 # correlation queries see meetings ingested via POST /meetings.
@@ -319,6 +321,7 @@ def get_entity_relationship_service() -> EntityRelationshipService:
     return EntityRelationshipService(
         entity_repo=_entity_repository,
         mention_repo=_mention_repository,
+        dependency_repo=_dependency_repository,
     )
 
 
@@ -1194,6 +1197,49 @@ def get_entity_relationships(
             detail=str(exc),
         ) from exc
     return _relationship_graph_to_response(graph)
+
+
+@router.get(
+    "/{entity_id}/dependencies",
+    response_model=list[EntityRelationshipSchema],
+    summary="Retrieve explicit dependencies for an entity",
+    description=(
+        "Return only the explicit dependency and blocking relationships for a specific "
+        "canonical entity (Stage 15).\n\n"
+        "**This endpoint answers: 'What explicit dependencies or blocks exist for this entity?'**\n\n"
+        "It filters out CO_OCCURS_WITH edges and returns only DEPENDS_ON and BLOCKS "
+        "relationships supported by verbatim meeting transcript evidence.\n\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_dependencies(
+    entity_id: str,
+    service: EntityRelationshipService = Depends(get_entity_relationship_service),
+) -> list[EntityRelationshipSchema]:
+    """Return explicit dependencies for a specific canonical entity."""
+    try:
+        relationships = service.get_dependency_relationships(entity_id=entity_id)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return [
+        EntityRelationshipSchema(
+            relationship_id=r.relationship_id,
+            source_entity_id=r.source_entity_id,
+            target_entity_id=r.target_entity_id,
+            relationship_type=RelationshipTypeSchema(r.relationship_type.value),
+            evidence_type=RelationshipEvidenceTypeSchema(r.evidence_type.value),
+            evidence=r.evidence,
+            related_meeting_ids=r.related_meeting_ids,
+            source_text=r.source_text,
+            mention_id=r.mention_id,
+            strength=r.strength,
+            deterministic_sort_key=r.deterministic_sort_key,
+        )
+        for r in relationships
+    ]
 
 
 @router.get(

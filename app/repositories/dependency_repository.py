@@ -1,0 +1,143 @@
+"""Dependency repository abstraction and in-memory implementation (Stage 15).
+
+Follows the exact same pattern as entity_repository.py, mention_repository.py,
+meeting_repository.py, and extraction_repository.py:
+  - AbstractDependencyRepository defines the storage contract.
+  - InMemoryDependencyRepository provides a dev/test implementation.
+  - A persistent backend (PostgreSQL, etc.) can replace the in-memory
+    implementation without any changes to the service layer.
+
+ExplicitDependency records are keyed by dependency_id (deterministic hash).
+Secondary access patterns (by entity pair, by meeting) use linear scans in
+the in-memory implementation; a database backend would use appropriate indices.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Optional
+
+from app.models.dependency import ExplicitDependency
+from app.models.relationships import RelationshipType
+
+
+# ---------------------------------------------------------------------------
+# Abstract interface
+# ---------------------------------------------------------------------------
+
+class AbstractDependencyRepository(ABC):
+    """Storage contract for explicit dependency records.
+
+    All methods are intentionally synchronous, matching the repository pattern
+    established in the rest of the codebase.
+    """
+
+    @abstractmethod
+    def save(self, dependency: ExplicitDependency) -> None:
+        """Persist an ExplicitDependency record.
+
+        If a record with the same dependency_id already exists it is replaced
+        (idempotent upsert semantics — re-processing the same meeting evidence
+        produces the same record).
+        """
+        ...
+
+    @abstractmethod
+    def get_by_id(self, dependency_id: str) -> Optional[ExplicitDependency]:
+        """Return the dependency record with the given ID, or None."""
+        ...
+
+    @abstractmethod
+    def list_by_entity_id(self, entity_id: str) -> list[ExplicitDependency]:
+        """Return all dependency records where entity_id is source OR target."""
+        ...
+
+    @abstractmethod
+    def list_by_source_entity_id(self, source_entity_id: str) -> list[ExplicitDependency]:
+        """Return all dependency records where the given entity is the source."""
+        ...
+
+    @abstractmethod
+    def list_by_target_entity_id(self, target_entity_id: str) -> list[ExplicitDependency]:
+        """Return all dependency records where the given entity is the target."""
+        ...
+
+    @abstractmethod
+    def list_by_entity_pair(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: Optional[RelationshipType] = None,
+    ) -> list[ExplicitDependency]:
+        """Return dependency records between a specific source and target.
+
+        If relationship_type is provided, only records of that type are returned.
+        """
+        ...
+
+    @abstractmethod
+    def list_all(self) -> list[ExplicitDependency]:
+        """Return all stored dependency records."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# In-memory implementation
+# ---------------------------------------------------------------------------
+
+class InMemoryDependencyRepository(AbstractDependencyRepository):
+    """Thread-unsafe in-memory store, suitable for development and testing.
+
+    For production use, replace with a persistent backend that implements
+    AbstractDependencyRepository.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, ExplicitDependency] = {}
+
+    def save(self, dependency: ExplicitDependency) -> None:
+        """Upsert an ExplicitDependency record keyed by dependency_id."""
+        self._store[dependency.dependency_id] = dependency
+
+    def get_by_id(self, dependency_id: str) -> Optional[ExplicitDependency]:
+        """Return the record with the given ID, or None."""
+        return self._store.get(dependency_id)
+
+    def list_by_entity_id(self, entity_id: str) -> list[ExplicitDependency]:
+        """Return records where entity_id appears as source or target."""
+        return [
+            d for d in self._store.values()
+            if d.source_entity_id == entity_id or d.target_entity_id == entity_id
+        ]
+
+    def list_by_source_entity_id(self, source_entity_id: str) -> list[ExplicitDependency]:
+        """Return records where the given entity is the source."""
+        return [
+            d for d in self._store.values()
+            if d.source_entity_id == source_entity_id
+        ]
+
+    def list_by_target_entity_id(self, target_entity_id: str) -> list[ExplicitDependency]:
+        """Return records where the given entity is the target."""
+        return [
+            d for d in self._store.values()
+            if d.target_entity_id == target_entity_id
+        ]
+
+    def list_by_entity_pair(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+        relationship_type: Optional[RelationshipType] = None,
+    ) -> list[ExplicitDependency]:
+        """Return records between source and target, optionally filtered by type."""
+        results = [
+            d for d in self._store.values()
+            if d.source_entity_id == source_entity_id
+            and d.target_entity_id == target_entity_id
+        ]
+        if relationship_type is not None:
+            results = [d for d in results if d.relationship_type == relationship_type]
+        return results
+
+    def list_all(self) -> list[ExplicitDependency]:
+        """Return all stored records."""
+        return list(self._store.values())

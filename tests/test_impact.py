@@ -80,8 +80,10 @@ def _make_mention(mention_id: str, entity_id: str, meeting_id: str, source_text:
         created_at=_BASE_TIME,
     )
 
-def _build_service(entities=None, meetings=None, mentions=None) -> ImpactAnalysisService:
+def _build_service(entities=None, meetings=None, mentions=None, dependencies=None) -> ImpactAnalysisService:
+    from app.repositories.dependency_repository import InMemoryDependencyRepository
     e_repo, m_repo, mtg_repo = InMemoryEntityRepository(), InMemoryMentionRepository(), InMemoryMeetingRepository()
+    d_repo = InMemoryDependencyRepository()
 
     for e in (entities or []):
         e_repo.create(e)
@@ -89,8 +91,10 @@ def _build_service(entities=None, meetings=None, mentions=None) -> ImpactAnalysi
         mtg_repo.save(mtg)
     for m in (mentions or []):
         m_repo.create(m)
+    for d in (dependencies or []):
+        d_repo.save(d)
 
-    rel_svc = EntityRelationshipService(e_repo, m_repo)
+    rel_svc = EntityRelationshipService(e_repo, m_repo, d_repo)
     interpreter = KeywordStateInterpreter()
     policy = DefaultTransitionPolicy()
     
@@ -253,6 +257,40 @@ def test_r09_stale_entity_low_impact() -> None:
     assert RiskSignalType.HIGH_ATTENTION in impacts[0].risk_signals
 
 # ---------------------------------------------------------------------------
+# R13: EXPLICIT_DEPENDENCY + BLOCKED -> HIGH impact
+# ---------------------------------------------------------------------------
+def test_r13_explicit_dependency_blocked() -> None:
+    from app.models.dependency import ExplicitDependency
+    from app.models.relationships import RelationshipType
+    
+    e1 = _make_entity("e1", "rahul") # Impacted
+    e2 = _make_entity("e2", "priya") # Source (BLOCKED)
+    mtg = _make_meeting("m1", _BASE_TIME)
+    
+    mentions = [
+        _make_mention("mn1", "e1", "m1", "rahul is waiting"),
+        _make_mention("mn2", "e2", "m1", "priya is blocked"),
+    ]
+    
+    dep = ExplicitDependency(
+        dependency_id="dep1",
+        mention_id="mn1",
+        source_entity_id="e1",
+        target_entity_id="e2",
+        relationship_type=RelationshipType.DEPENDS_ON,
+        source_text="Rahul depends on Priya",
+        meeting_id="m1",
+    )
+    
+    service = _build_service([e1, e2], [mtg], mentions, [dep])
+    impacts = service.get_entity_impacts("e1", _BASE_TIME)
+    
+    assert len(impacts) == 1
+    assert impacts[0].impact_level == ImpactLevel.HIGH
+    assert RiskSignalType.EXPLICIT_DEPENDENCY in impacts[0].risk_signals
+    assert impacts[0].reason == "Entity has an explicit dependency on an entity which is currently in a BLOCKED state."
+
+# ---------------------------------------------------------------------------
 # R12: Sort order is correct
 # ---------------------------------------------------------------------------
 def test_r12_sort_order() -> None:
@@ -313,9 +351,11 @@ def impact_client():
     from app.main import app
     from app.api.entities import get_impact_analysis_service, get_entity_service
 
+    from app.repositories.dependency_repository import InMemoryDependencyRepository
     e_repo, m_repo, mtg_repo = InMemoryEntityRepository(), InMemoryMentionRepository(), InMemoryMeetingRepository()
+    d_repo = InMemoryDependencyRepository()
     
-    rel_svc = EntityRelationshipService(e_repo, m_repo)
+    rel_svc = EntityRelationshipService(e_repo, m_repo, d_repo)
     interpreter = KeywordStateInterpreter()
     policy = DefaultTransitionPolicy()
     

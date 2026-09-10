@@ -5,6 +5,7 @@ deliberately kept separate from internal domain models.
 """
 
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,8 @@ class RelationshipTypeSchema(str, Enum):
     """Relationship types returned by the API."""
 
     CO_OCCURS_WITH = "CO_OCCURS_WITH"
+    DEPENDS_ON = "DEPENDS_ON"
+    BLOCKS = "BLOCKS"
     RELATED_TO = "RELATED_TO"
 
 
@@ -20,6 +23,7 @@ class RelationshipEvidenceTypeSchema(str, Enum):
     """Evidence types for relationships returned by the API."""
 
     CO_OCCURRENCE = "CO_OCCURRENCE"
+    EXPLICIT_STATEMENT = "EXPLICIT_STATEMENT"
 
 
 class EntityRelationshipSchema(BaseModel):
@@ -32,6 +36,10 @@ class EntityRelationshipSchema(BaseModel):
     evidence_type: RelationshipEvidenceTypeSchema = Field(..., description="The type of evidence justifying this relationship.")
     evidence: str = Field(..., description="Human-readable summary of the evidence.")
     related_meeting_ids: list[str] = Field(default_factory=list, description="IDs of meetings providing evidence.")
+    
+    source_text: Optional[str] = Field(default=None, description="For EXPLICIT_STATEMENT: verbatim transcript excerpt.")
+    mention_id: Optional[str] = Field(default=None, description="For EXPLICIT_STATEMENT: ID of the resolved mention.")
+    
     strength: int = Field(..., description="Deterministic strength score (e.g., meeting co-occurrence count).")
     deterministic_sort_key: str = Field(..., description="Stable key for repeatable ordering.")
 

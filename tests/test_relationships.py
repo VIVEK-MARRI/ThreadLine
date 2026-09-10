@@ -37,9 +37,10 @@ from app.models.entity import (
     EntityType,
     ResolutionStatus,
 )
-from app.models.relationships import EntityRelationshipGraph
+from app.models.relationships import EntityRelationshipGraph, RelationshipType
 from app.repositories.entity_repository import InMemoryEntityRepository
 from app.repositories.mention_repository import InMemoryMentionRepository
+from app.repositories.dependency_repository import InMemoryDependencyRepository
 from app.services.entity_relationship_service import EntityRelationshipService
 from app.services.entity_service import EntityNotFoundError
 
@@ -70,18 +71,22 @@ def _make_mention(mention_id: str, entity_id: Optional[str], meeting_id: str, st
         created_at=_BASE_TIME,
     )
 
-def _build_service(entities=None, mentions=None) -> EntityRelationshipService:
+def _build_service(entities=None, mentions=None, dependencies=None) -> EntityRelationshipService:
     entity_repo = InMemoryEntityRepository()
     mention_repo = InMemoryMentionRepository()
+    dependency_repo = InMemoryDependencyRepository()
 
     for e in (entities or []):
         entity_repo.create(e)
     for m in (mentions or []):
         mention_repo.create(m)
+    for d in (dependencies or []):
+        dependency_repo.save(d)
 
     return EntityRelationshipService(
         entity_repo=entity_repo,
         mention_repo=mention_repo,
+        dependency_repo=dependency_repo,
     )
 
 # ---------------------------------------------------------------------------
@@ -283,6 +288,38 @@ def test_r10_self_loops_ignored() -> None:
     assert result.relationship_count == 0
 
 # ---------------------------------------------------------------------------
+# Stage 15: Dependency Relationships
+# ---------------------------------------------------------------------------
+def test_dependency_relationships() -> None:
+    from app.models.dependency import ExplicitDependency
+    
+    e1 = _make_entity("e1", "rahul kumar")
+    e2 = _make_entity("e2", "priya sharma")
+    
+    m1 = _make_mention("mn1", "e1", "m-1", ResolutionStatus.RESOLVED)
+    
+    dep = ExplicitDependency(
+        dependency_id="dep1",
+        mention_id="mn1",
+        source_entity_id="e1",
+        target_entity_id="e2",
+        relationship_type=RelationshipType.DEPENDS_ON,
+        source_text="Rahul Kumar depends on Priya Sharma",
+        meeting_id="m-1",
+    )
+    
+    service = _build_service(entities=[e1, e2], mentions=[m1], dependencies=[dep])
+    result = service.get_dependency_relationships("e1")
+    
+    assert len(result) == 1
+    rel = result[0]
+    assert rel.relationship_type == RelationshipType.DEPENDS_ON
+    assert rel.source_entity_id == "e1"
+    assert rel.target_entity_id == "e2"
+    assert rel.evidence_type.value == "EXPLICIT_STATEMENT"
+    assert rel.related_meeting_ids == ["m-1"]
+
+# ---------------------------------------------------------------------------
 # API Endpoint Tests
 # ---------------------------------------------------------------------------
 
@@ -293,10 +330,12 @@ def relationship_client():
 
     entity_repo = InMemoryEntityRepository()
     mention_repo = InMemoryMentionRepository()
+    dependency_repo = InMemoryDependencyRepository()
 
     service = EntityRelationshipService(
         entity_repo=entity_repo,
         mention_repo=mention_repo,
+        dependency_repo=dependency_repo,
     )
 
     from app.services.entity_service import EntityService

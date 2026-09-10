@@ -11,6 +11,7 @@ from typing import List
 from app.models.attention import AttentionLevel
 from app.models.impact import EntityImpact, ImpactLevel, RiskSignalType
 from app.models.insights import InsightType
+from app.models.relationships import RelationshipType
 from app.models.temporal import TemporalState
 from app.repositories.entity_repository import AbstractEntityRepository
 from app.services.attention_service import AttentionService
@@ -54,25 +55,39 @@ class ImpactAnalysisService:
 
         impacts: List[EntityImpact] = []
 
-        # 1. Get all entities that co-occur with this one
+        # 1. Get all relationships for this entity
         graph = self._relationship_service.get_relationship_graph(entity_id)
         
-        # Build a mapping from related_entity_id to its relationship edge
+        # Build a mapping from related_entity_id to its relationships
         related_map = {}
         for rel in graph.relationships:
             # Determine the other entity in the edge
             other_id = rel.source_entity_id if rel.target_entity_id == entity_id else rel.target_entity_id
             if other_id != entity_id:
-                related_map[other_id] = rel
+                if other_id not in related_map:
+                    related_map[other_id] = []
+                related_map[other_id].append(rel)
         
         # 2. For each related entity (the source of potential risk), evaluate its risk signals
-        for source_id, rel in related_map.items():
+        for source_id, rels in related_map.items():
             risk_signals = set()
+            
+            # Check if there is an explicit DEPENDS_ON relationship where entity_id depends on source_id
+            has_explicit_dependency = False
+            for rel in rels:
+                if rel.relationship_type == RelationshipType.DEPENDS_ON and rel.source_entity_id == entity_id and rel.target_entity_id == source_id:
+                    has_explicit_dependency = True
+                    break
+                elif rel.relationship_type == RelationshipType.BLOCKS and rel.source_entity_id == source_id and rel.target_entity_id == entity_id:
+                    has_explicit_dependency = True
+                    break
             
             # 2a. Temporal State
             timeline = self._temporal_service.get_entity_timeline(source_id)
             if timeline.current_state == TemporalState.BLOCKED:
                 risk_signals.add(RiskSignalType.BLOCKED_ENTITY)
+                if has_explicit_dependency:
+                    risk_signals.add(RiskSignalType.EXPLICIT_DEPENDENCY)
             
             # 2b. Attention
             attention = self._attention_service.get_entity_attention(source_id, current_time)
@@ -97,10 +112,22 @@ class ImpactAnalysisService:
                 
             sorted_signals = sorted(list(risk_signals), key=lambda s: s.value)
             
-            # 3. Determine impact level and reason
-            is_strong = rel.strength >= 2
+            # Use max strength among all relationships to this source
+            max_strength = max(r.strength for r in rels)
             
-            if RiskSignalType.CRITICAL_ATTENTION in sorted_signals and is_strong:
+            # Aggregate related meeting IDs
+            all_meetings = set()
+            for r in rels:
+                all_meetings.update(r.related_meeting_ids)
+            related_meeting_ids = sorted(list(all_meetings))
+            
+            # 3. Determine impact level and reason
+            is_strong = max_strength >= 2
+            
+            if RiskSignalType.EXPLICIT_DEPENDENCY in sorted_signals and RiskSignalType.BLOCKED_ENTITY in sorted_signals:
+                impact_level = ImpactLevel.HIGH
+                reason = "Entity has an explicit dependency on an entity which is currently in a BLOCKED state."
+            elif RiskSignalType.CRITICAL_ATTENTION in sorted_signals and is_strong:
                 impact_level = ImpactLevel.CRITICAL
                 reason = "The impacted entity frequently co-occurs with an entity that requires CRITICAL attention."
             elif RiskSignalType.BLOCKED_ENTITY in sorted_signals:
@@ -124,7 +151,7 @@ class ImpactAnalysisService:
                 
             # 4. Generate deterministic ID and sort key
             # Hash source_id + impacted_id to ensure deduplication/stability
-            hash_input = f"{source_id}:{entity_id}:{impact_level.value}:{rel.strength}".encode("utf-8")
+            hash_input = f"{source_id}:{entity_id}:{impact_level.value}:{max_strength}".encode("utf-8")
             impact_id = hashlib.sha256(hash_input).hexdigest()[:16]
             
             # Level value for sorting (CRITICAL=4, HIGH=3, MEDIUM=2, LOW=1)
@@ -136,7 +163,7 @@ class ImpactAnalysisService:
             }
             sort_val = level_map[impact_level]
             
-            sort_key = f"{sort_val}_{rel.strength:06d}_{source_id}_{entity_id}_{impact_id}"
+            sort_key = f"{sort_val}_{max_strength:06d}_{source_id}_{entity_id}_{impact_id}"
             
             impact = EntityImpact(
                 impact_id=impact_id,
@@ -144,8 +171,8 @@ class ImpactAnalysisService:
                 impacted_entity_id=entity_id,
                 impact_level=impact_level,
                 risk_signals=sorted_signals,
-                relationship_strength=rel.strength,
-                related_meeting_ids=rel.related_meeting_ids,
+                relationship_strength=max_strength,
+                related_meeting_ids=related_meeting_ids,
                 reason=reason,
                 generated_from_at=current_time,
                 deterministic_sort_key=sort_key
