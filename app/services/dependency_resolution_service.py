@@ -8,7 +8,10 @@ Pipeline
 For each resolved entity mention (entity_id is known):
   1. Run KeywordExtractor on mention.source_text.
   2. For each ExtractedRelationStatement:
-     a. SOURCE entity_id = mention.entity_id (already resolved).
+     a. SOURCE validation: the extracted source_ref must match the resolved
+        mention's entity (canonical_name or an alias).  If the source_ref
+        does NOT match the mention's entity, the statement is discarded —
+        we must never fabricate a dependency for the wrong entity.
      b. TARGET entity name = statement.target_ref → look up via entity_repo.
      c. If target resolves → create ExplicitDependency and save to repo.
      d. If target does not resolve → discard (no fabrication).
@@ -17,6 +20,27 @@ For each resolved entity mention (entity_id is known):
      - relationship_type must be DEPENDS_ON or BLOCKS.
      - Both participants must be canonical entities.
      - Evidence must exist (source_text is non-empty).
+
+Source reference validation rationale
+--------------------------------------
+Consider a mention whose source_text is:
+    "Auth Service blocks Frontend."
+
+If this mention was resolved to entity "Auth Service", then the extractor
+produces source_ref="Auth Service", which MATCHES the mention's entity →
+relationship is created.
+
+If the same mention was incorrectly resolved to "Frontend" (a resolution
+error in the pipeline), we must NOT silently create "Frontend BLOCKS Frontend"
+or "Frontend BLOCKS some_other_entity".  The validation step catches this:
+source_ref="Auth Service" does NOT match "Frontend" → relationship discarded.
+
+Target entity type search order
+---------------------------------
+The _resolve_target helper searches entity types in a fixed, deterministic
+order: ISSUE first, then PERSON.  This order is conservative and explicit.
+If the architecture later introduces additional entity types, this list must
+be extended here.
 
 Design notes
 ------------
@@ -29,26 +53,20 @@ Design notes
 - dependency_id is deterministic:
     sha256(f"{source_id}:{target_id}:{rel_type}:{meeting_id}")[:16]
   Re-processing the same mention produces the same record (idempotent).
-- entity_type is not enforced during target lookup — the extractor does not
-  know whether "database migration" is an ISSUE or another type.  The
-  find_by_canonical_name call searches across entity types by normalised name
-  only.  If the architecture later requires type-scoped lookup, this can be
-  changed without breaking the rest of the system.
 
 IMPORTANT: This service never invents entity IDs or fabricates relationships.
-An unresolved target simply produces no relationship record.
+An unresolved target or a source mismatch simply produces no relationship record.
 """
 
 import hashlib
 import logging
-from typing import Optional
 
 from app.dependency_extraction.keyword_extractor import extract_relationship_statements
 from app.models.dependency import ExplicitDependency
 from app.models.entity import EntityType
 from app.models.relationships import RelationshipEvidenceType, RelationshipType
 from app.repositories.dependency_repository import AbstractDependencyRepository
-from app.repositories.entity_repository import AbstractEntityRepository
+from app.repositories.entity_repository import AbstractEntityRepository, _normalize
 from app.repositories.mention_repository import AbstractMentionRepository
 
 logger = logging.getLogger(__name__)
@@ -66,6 +84,29 @@ def _make_dependency_id(
     """
     raw = f"{source_entity_id}:{target_entity_id}:{relationship_type.value}:{meeting_id}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _source_ref_matches_entity(
+    source_ref: str,
+    entity_canonical_name: str,
+    entity_aliases: list[str],
+) -> bool:
+    """Return True if source_ref matches the entity's name or any alias.
+
+    Comparison is case-insensitive and whitespace-normalised, using the same
+    _normalize() function as the entity repository.
+
+    This guards against fabricating a relationship where the mention was
+    resolved to entity A but the extracted relationship statement refers to
+    entity B as the source.
+    """
+    normalised_ref = _normalize(source_ref)
+    if normalised_ref == _normalize(entity_canonical_name):
+        return True
+    for alias in entity_aliases:
+        if normalised_ref == _normalize(alias):
+            return True
+    return False
 
 
 class DependencyResolutionService:
@@ -89,9 +130,10 @@ class DependencyResolutionService:
     def resolve_mention_dependencies(self, mention_id: str) -> list[ExplicitDependency]:
         """Resolve explicit dependencies from a single entity mention.
 
-        Runs the keyword extractor on the mention's source_text, attempts to
-        resolve the target participant to a canonical entity, and stores any
-        successfully resolved ExplicitDependency records.
+        Runs the keyword extractor on the mention's source_text, validates the
+        source participant against the resolved entity, attempts to resolve the
+        target participant to a canonical entity, and stores any successfully
+        resolved ExplicitDependency records.
 
         Parameters
         ----------
@@ -103,12 +145,14 @@ class DependencyResolutionService:
         list[ExplicitDependency]
             All ExplicitDependency records successfully resolved and stored.
             Empty list if the mention is unresolved, has no source_text,
-            or no explicit dependency language was found.
+            no explicit dependency language was found, or all statements
+            failed source validation or target resolution.
 
         Notes
         -----
         Silently skips unresolved mentions (entity_id is None).
-        Silently discards any statement where the target does not resolve.
+        Silently discards statements where source_ref does not match the mention's entity.
+        Silently discards statements where the target does not resolve.
         """
         mention = self._mention_repo.get_by_id(mention_id)
         if mention is None:
@@ -128,6 +172,16 @@ class DependencyResolutionService:
 
         source_entity_id = mention.entity_id
 
+        # Fetch the source entity to validate the extracted source_ref.
+        source_entity = self._entity_repo.get_by_id(source_entity_id)
+        if source_entity is None:
+            logger.debug(
+                "DependencyResolutionService: source entity '%s' not found; skipping mention '%s'.",
+                source_entity_id,
+                mention_id,
+            )
+            return []
+
         statements = extract_relationship_statements(mention.source_text)
         if not statements:
             return []
@@ -135,16 +189,29 @@ class DependencyResolutionService:
         resolved: list[ExplicitDependency] = []
 
         for stmt in statements:
-            # The source participant in the statement is a raw text reference.
-            # However, the mention itself belongs to the source entity — the
-            # source entity is ALREADY RESOLVED.  We use mention.entity_id directly.
-            #
-            # The target participant name comes from the pattern match and must
-            # be resolved via entity_repo.
+            # Source validation: verify that the extracted source_ref corresponds
+            # to the mention's resolved entity.  This prevents creating a
+            # dependency for the wrong entity when the source_text contains a
+            # statement about a different entity.
+            if not _source_ref_matches_entity(
+                source_ref=stmt.source_ref,
+                entity_canonical_name=source_entity.canonical_name,
+                entity_aliases=source_entity.aliases,
+            ):
+                logger.debug(
+                    "DependencyResolutionService: source_ref %r does not match "
+                    "entity '%s' ('%s'); discarding %s statement from mention '%s'.",
+                    stmt.source_ref,
+                    source_entity_id,
+                    source_entity.canonical_name,
+                    stmt.relationship_type.value,
+                    mention_id,
+                )
+                continue
 
             target_ref = stmt.target_ref
 
-            # Try to resolve target across all entity types (conservative: name match only)
+            # Try to resolve target across entity types (conservative: name match only)
             target_entity = self._resolve_target(target_ref)
 
             if target_entity is None:
@@ -242,11 +309,21 @@ class DependencyResolutionService:
     def _resolve_target(self, target_ref: str):
         """Attempt to resolve a raw target text reference to a canonical entity.
 
-        Tries all entity types in a deterministic order.  Returns the first
-        match, or None if no canonical entity matches the normalised name.
+        Tries entity types in a fixed, deterministic order:
+          1. ISSUE
+          2. PERSON
+
+        Returns the first match, or None if no canonical entity matches the
+        normalised name.
 
         This is conservative: only exact normalised name matches succeed.
         Fuzzy or semantic matching is intentionally not performed here.
+
+        Entity type search order is ISSUE-first because:
+        - Dependency language in meeting transcripts most commonly refers
+          to ISSUE-type entities (projects, tasks, system components).
+        - If the same name exists as both an ISSUE and a PERSON, the ISSUE
+          interpretation is more likely in a dependency context.
         """
         for entity_type in [EntityType.ISSUE, EntityType.PERSON]:
             entity = self._entity_repo.find_by_canonical_name(

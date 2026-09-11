@@ -23,6 +23,16 @@ mention.  Automatic entity creation only happens via an explicit API call.
 
 This policy prevents incorrect entity merges, which are harder to undo
 than simply leaving a mention unresolved.
+
+Dependency resolution integration (Stage 15)
+--------------------------------------------
+When a ``dependency_resolution_service`` is provided, it is called
+automatically after a mention is stored and RESOLVED.  This ensures the
+explicit dependency extraction pipeline runs as part of the normal mention
+registration flow rather than requiring a separate call.
+
+The service is optional so that callers that do not require dependency
+resolution (e.g. tests for earlier pipeline stages) can omit it.
 """
 
 import logging
@@ -61,9 +71,13 @@ class EntityService:
         self,
         entity_repo: AbstractEntityRepository,
         mention_repo: AbstractMentionRepository,
+        dependency_resolution_service=None,
     ) -> None:
         self._entity_repo = entity_repo
         self._mention_repo = mention_repo
+        # Optional: when supplied, dependency extraction runs automatically
+        # after each mention is registered and resolved.
+        self._dependency_resolution_service = dependency_resolution_service
 
     # ------------------------------------------------------------------
     # Canonical entity operations
@@ -223,4 +237,24 @@ class EntityService:
             created_at=datetime.now(tz=timezone.utc),
         )
         self._mention_repo.create(mention)
+
+        # Stage 15: automatically run dependency extraction when a mention
+        # is resolved and a DependencyResolutionService is available.
+        if (
+            status == ResolutionStatus.RESOLVED
+            and self._dependency_resolution_service is not None
+        ):
+            try:
+                self._dependency_resolution_service.resolve_mention_dependencies(
+                    mention.mention_id
+                )
+            except Exception:
+                # Dependency extraction must never block mention registration.
+                # Log the error but allow the mention to be returned.
+                logger.exception(
+                    "EntityService: dependency resolution failed for mention '%s'; "
+                    "mention is still stored and resolved.",
+                    mention.mention_id,
+                )
+
         return mention

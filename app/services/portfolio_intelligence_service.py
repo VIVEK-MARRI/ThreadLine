@@ -86,6 +86,7 @@ from app.models.portfolio import (
     PortfolioRiskLevel,
 )
 from app.models.temporal import TemporalState
+from app.repositories.dependency_repository import AbstractDependencyRepository
 from app.repositories.entity_repository import AbstractEntityRepository
 from app.repositories.meeting_repository import AbstractMeetingRepository
 from app.repositories.mention_repository import AbstractMentionRepository
@@ -212,6 +213,7 @@ class PortfolioIntelligenceService:
         meeting_repo: AbstractMeetingRepository,
         interpreter: AbstractStateInterpreter,
         policy: AbstractTemporalStatePolicy,
+        dependency_repo: Optional[AbstractDependencyRepository] = None,
     ) -> None:
         self._entity_repo = entity_repo
 
@@ -249,6 +251,7 @@ class PortfolioIntelligenceService:
         relationship_service = EntityRelationshipService(
             entity_repo=entity_repo,
             mention_repo=mention_repo,
+            dependency_repo=dependency_repo,
         )
         self._impact_service = ImpactAnalysisService(
             entity_repo=entity_repo,

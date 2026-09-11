@@ -145,10 +145,22 @@ from app.api.meetings import get_meeting_repository as _get_shared_meeting_repos
 # ---------------------------------------------------------------------------
 
 def get_entity_service() -> EntityService:
-    """FastAPI dependency that provides a configured EntityService."""
+    """FastAPI dependency that provides a configured EntityService.
+
+    Wires in DependencyResolutionService so that dependency extraction runs
+    automatically after each mention is registered and resolved.
+    """
+    from app.services.dependency_resolution_service import DependencyResolutionService
+
+    dep_resolution_service = DependencyResolutionService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        dependency_repo=_dependency_repository,
+    )
     return EntityService(
         entity_repo=_entity_repository,
         mention_repo=_mention_repository,
+        dependency_resolution_service=dep_resolution_service,
     )
 
 
@@ -339,11 +351,13 @@ def get_impact_analysis_service() -> ImpactAnalysisService:
 def get_portfolio_intelligence_service():
     """FastAPI dependency that provides a configured PortfolioIntelligenceService.
 
-    Uses the shared entity, mention, and meeting repository singletons plus
-    the default keyword-based interpreter and transition policy.
+    Uses the shared entity, mention, meeting, and dependency repository singletons
+    plus the default keyword-based interpreter and transition policy.
     PortfolioIntelligenceService internally composes AttentionService,
     InsightService, ActionRecommendationService, TemporalStateService, and
     ImpactAnalysisService — all sharing the same underlying repositories.
+    The dependency_repo is passed so that portfolio impact analysis correctly
+    accounts for explicit DEPENDS_ON and BLOCKS relationships.
     All components are stateless and can be recreated freely.
     """
     from app.services.portfolio_intelligence_service import PortfolioIntelligenceService
@@ -354,6 +368,7 @@ def get_portfolio_intelligence_service():
         meeting_repo=_get_shared_meeting_repository(),
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
+        dependency_repo=_dependency_repository,
     )
 
 
@@ -1178,9 +1193,18 @@ def get_entity_correlations(
     description=(
         "Return the relationship intelligence graph for a specific canonical entity.\n\n"
         "**This endpoint answers: 'What entities are related to this entity?'**\n\n"
-        "It currently infers relationships based solely on deterministic meeting "
-        "co-occurrence (CO_OCCURS_WITH). Explicit dependencies (e.g., BLOCKS) "
-        "are not supported as the ingestion data lacks deterministic evidence.\n\n"
+        "It returns two classes of relationships:\n\n"
+        "- **CO_OCCURS_WITH**: entities that co-appeared in the same meeting transcript. "
+        "This is a symmetric association inferred from meeting co-occurrence. "
+        "It does NOT imply any dependency or causal relationship.\n"
+        "- **DEPENDS_ON**: entity explicitly stated to depend on another entity, "
+        "supported by verbatim meeting transcript evidence.\n"
+        "- **BLOCKS**: entity explicitly stated to be blocking another entity, "
+        "supported by verbatim meeting transcript evidence.\n\n"
+        "**Important semantic constraint**: CO_OCCURS_WITH is NEVER promoted to "
+        "DEPENDS_ON or BLOCKS. Only explicit transcript evidence produces dependency "
+        "relationships.\n\n"
+        "For explicit dependencies only, see GET /{entity_id}/dependencies.\n\n"
         "**Returns HTTP 404** if the entity_id does not exist."
     ),
 )
