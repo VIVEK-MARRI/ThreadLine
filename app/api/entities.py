@@ -93,6 +93,11 @@ from app.schemas.relationships import (
     RelationshipTypeSchema,
     RelationshipEvidenceTypeSchema,
 )
+from app.schemas.dependency_graph import (
+    DependencyGraphResponse,
+    DependencyPathSchema,
+    DependencyEdgeSchema,
+)
 from app.schemas.impact import (
     EntityImpactResponse,
     EntityImpactSchema,
@@ -117,6 +122,7 @@ from app.services.attention_service import AttentionService
 from app.services.action_recommendation_service import ActionRecommendationService
 from app.services.unified_timeline_service import UnifiedTimelineService
 from app.services.entity_relationship_service import EntityRelationshipService
+from app.services.dependency_graph_service import DependencyGraphService
 from app.services.impact_analysis_service import ImpactAnalysisService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
@@ -337,6 +343,14 @@ def get_entity_relationship_service() -> EntityRelationshipService:
     )
 
 
+def get_dependency_graph_service() -> DependencyGraphService:
+    """FastAPI dependency that provides a configured DependencyGraphService."""
+    return DependencyGraphService(
+        dependency_repo=_dependency_repository,
+        entity_repo=_entity_repository,
+    )
+
+
 def get_impact_analysis_service() -> ImpactAnalysisService:
     """FastAPI dependency that provides a configured ImpactAnalysisService."""
     return ImpactAnalysisService(
@@ -345,6 +359,7 @@ def get_impact_analysis_service() -> ImpactAnalysisService:
         temporal_service=get_temporal_state_service(),
         insight_service=get_insight_service(),
         attention_service=get_attention_service(),
+        dependency_graph_service=get_dependency_graph_service(),
     )
 
 
@@ -673,20 +688,26 @@ def _relationship_graph_to_response(graph) -> EntityRelationshipGraphResponse:
     )
 
 
-def _impacts_to_response(entity_id: str, impacts: list) -> EntityImpactResponse:
-    """Translate list[EntityImpact] domain models to API response schema."""
+def _impacts_to_response(
+    entity_id: str, impacts: list
+) -> EntityImpactResponse:
+    """Translate list[EntityImpact] domain models to EntityImpactResponse."""
+    from app.models.impact import EntityImpact  # local import
+
     impact_schemas = [
         EntityImpactSchema(
             impact_id=i.impact_id,
             source_entity_id=i.source_entity_id,
             impacted_entity_id=i.impacted_entity_id,
             impact_level=ImpactLevel(i.impact_level.value),
-            risk_signals=[RiskSignalType(rs.value) for rs in i.risk_signals],
+            risk_signals=[RiskSignalType(r.value) for r in i.risk_signals],
             relationship_strength=i.relationship_strength,
             related_meeting_ids=i.related_meeting_ids,
             reason=i.reason,
             generated_from_at=i.generated_from_at,
             deterministic_sort_key=i.deterministic_sort_key,
+            dependency_depth=i.dependency_depth,
+            dependency_path=i.dependency_path,
         )
         for i in impacts
     ]
@@ -694,6 +715,46 @@ def _impacts_to_response(entity_id: str, impacts: list) -> EntityImpactResponse:
         entity_id=entity_id,
         impact_count=len(impact_schemas),
         impacts=impact_schemas,
+    )
+
+
+def _dependency_graph_to_response(
+    graph,
+) -> DependencyGraphResponse:
+    """Translate DependencyGraph domain model to DependencyGraphResponse."""
+    
+    def _translate_edge(edge) -> DependencyEdgeSchema:
+        return DependencyEdgeSchema(
+            source_entity_id=edge.source_entity_id,
+            target_entity_id=edge.target_entity_id,
+            relationship_type=RelationshipTypeSchema(edge.relationship_type.value),
+            strength=edge.strength,
+            related_meeting_ids=edge.related_meeting_ids,
+            source_text=edge.source_text,
+            mention_id=edge.mention_id,
+        )
+
+    def _translate_path(path) -> DependencyPathSchema:
+        return DependencyPathSchema(
+            path_id=path.path_id,
+            start_entity_id=path.start_entity_id,
+            end_entity_id=path.end_entity_id,
+            depth=path.depth,
+            entity_path=path.entity_path,
+            relationship_path=[RelationshipTypeSchema(r.value) for r in path.relationship_path],
+            edges=[_translate_edge(e) for e in path.edges],
+            is_direct=path.is_direct,
+            is_transitive=path.is_transitive,
+        )
+
+    return DependencyGraphResponse(
+        root_entity_id=graph.root_entity_id,
+        direct_dependencies=[_translate_path(p) for p in graph.direct_dependencies],
+        transitive_dependencies=[_translate_path(p) for p in graph.transitive_dependencies],
+        all_reachable_entity_ids=graph.all_reachable_entity_ids,
+        max_depth_reached=graph.max_depth_reached,
+        contains_cycle=graph.contains_cycle,
+        cycle_entity_ids=graph.cycle_entity_ids,
     )
 
 
@@ -1274,25 +1335,59 @@ def get_entity_dependencies(
         "Return the risk impact associations directed at a specific canonical entity.\n\n"
         "**This endpoint answers: 'What risks from other associated entities are "
         "impacting this entity?'**\n\n"
-        "Impacts are inferred deterministically from CO_OCCURS_WITH relationships "
-        "and risk signals (Attention, Insights, Temporal State).\n\n"
+        "Impacts are inferred deterministically from explicit dependency graph paths, "
+        "CO_OCCURS_WITH relationships, and risk signals (Attention, Insights, Temporal State).\n\n"
+        "Supports multi-hop impact propagation via transitive explicit dependencies.\n\n"
         "**Returns HTTP 404** if the entity_id does not exist."
     ),
 )
 def get_entity_impacts(
     entity_id: str,
+    max_depth: int = Query(default=3, ge=1, le=10, description="Max depth for transitive dependencies"),
     service: ImpactAnalysisService = Depends(get_impact_analysis_service),
 ) -> EntityImpactResponse:
     """Return the risk impact associations directed at a canonical entity."""
     current_time = datetime.now(timezone.utc)
     try:
-        impacts = service.get_entity_impacts(entity_id=entity_id, current_time=current_time)
+        impacts = service.get_entity_impacts_multi_hop(
+            entity_id=entity_id, 
+            current_time=current_time, 
+            max_depth=max_depth
+        )
     except EntityNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
     return _impacts_to_response(entity_id, impacts)
+
+@router.get(
+    "/{entity_id}/dependency-graph",
+    response_model=DependencyGraphResponse,
+    summary="Retrieve multi-hop explicit dependency graph",
+    description=(
+        "Return the complete explicit dependency graph reachable from this entity.\n\n"
+        "**This endpoint answers: 'What does this entity depend on, both directly and transitively?'**\n\n"
+        "Traverses all outgoing DEPENDS_ON and BLOCKS relationships up to `max_depth`.\n"
+        "Contains full cycle detection and handles multiple paths deterministically.\n"
+        "CO_OCCURS_WITH relationships are entirely excluded from graph traversal.\n\n"
+        "**Returns HTTP 404** if the entity_id does not exist."
+    ),
+)
+def get_entity_dependency_graph(
+    entity_id: str,
+    max_depth: int = Query(default=3, ge=1, le=10, description="Max depth for dependency traversal"),
+    service: DependencyGraphService = Depends(get_dependency_graph_service),
+) -> DependencyGraphResponse:
+    """Return the explicit dependency graph for a specific canonical entity."""
+    try:
+        graph = service.build_dependency_graph(entity_id=entity_id, max_depth=max_depth)
+    except EntityNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return _dependency_graph_to_response(graph)
 
 
 @router.get(

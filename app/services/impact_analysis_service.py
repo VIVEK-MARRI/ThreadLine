@@ -19,6 +19,7 @@ from app.services.entity_relationship_service import EntityRelationshipService
 from app.services.entity_service import EntityNotFoundError
 from app.services.insight_service import InsightService
 from app.services.temporal_state_service import TemporalStateService
+from app.services.dependency_graph_service import DependencyGraphService
 
 
 class ImpactAnalysisService:
@@ -31,12 +32,14 @@ class ImpactAnalysisService:
         temporal_service: TemporalStateService,
         insight_service: InsightService,
         attention_service: AttentionService,
+        dependency_graph_service: DependencyGraphService | None = None,
     ) -> None:
         self._entity_repo = entity_repo
         self._relationship_service = relationship_service
         self._temporal_service = temporal_service
         self._insight_service = insight_service
         self._attention_service = attention_service
+        self._dependency_graph_service = dependency_graph_service
 
     def get_entity_impacts(self, entity_id: str, current_time: datetime) -> List[EntityImpact]:
         """Return the impact associations directed at a specific entity.
@@ -190,3 +193,157 @@ class ImpactAnalysisService:
         ))
 
         return impacts
+
+    def get_entity_impacts_multi_hop(
+        self, entity_id: str, current_time: datetime, max_depth: int = 3
+    ) -> List[EntityImpact]:
+        """Return multi-hop risk impact associations directed at a specific entity.
+
+        This combines direct impact associations (from get_entity_impacts) with
+        transitive impacts discovered through explicit dependency graph traversal.
+
+        Args:
+            entity_id: The ID of the canonical entity being impacted.
+            current_time: The timestamp for evaluating current attention/staleness.
+            max_depth: The maximum dependency graph traversal depth.
+
+        Raises:
+            EntityNotFoundError: If the entity does not exist.
+        """
+        # 1. Get base (direct) impacts
+        base_impacts = self.get_entity_impacts(entity_id, current_time)
+
+        if not self._dependency_graph_service:
+            return base_impacts
+
+        # 2. Get dependency graph to discover transitive paths where entity_id
+        # DEPENDS_ON others. We want to find entities that *entity_id* depends on,
+        # which might be blocked, thus propagating impact to entity_id.
+        graph = self._dependency_graph_service.build_dependency_graph(entity_id, max_depth=max_depth)
+
+        # 3. Evaluate transitive paths
+        transitive_impacts_map = {}
+
+        for path in graph.transitive_dependencies:
+            # Check if the end entity (the deepest dependency) is blocked
+            timeline = self._temporal_service.get_entity_timeline(path.end_entity_id)
+            if timeline.current_state != TemporalState.BLOCKED:
+                continue
+
+            # It is blocked, and we have a transitive path.
+            source_id = path.end_entity_id
+
+            # Only keep the shortest path if we have multiple paths to the same entity
+            if source_id in transitive_impacts_map:
+                existing_path = transitive_impacts_map[source_id]
+                if path.depth < existing_path.depth:
+                    transitive_impacts_map[source_id] = path
+            else:
+                transitive_impacts_map[source_id] = path
+
+        # 4. Generate Impact records for transitive dependencies
+        transitive_impacts = []
+        for source_id, path in transitive_impacts_map.items():
+            # Check if there is already a base impact for this source entity.
+            # If so, and if it's already an EXPLICIT_DEPENDENCY, we don't need a separate transitive impact.
+            # Wait, if it's transitive, it shouldn't be in base impacts as an explicit dependency,
+            # because base impacts only check direct explicit dependencies.
+            # But what if they CO_OCCUR as well? Then there's a base impact with BLOCKED_ENTITY.
+            # We can upgrade or merge it, but it's simpler to deduplicate: if we generate a transitive impact,
+            # and there's a base impact for the same source, we replace the base impact if the transitive one
+            # is stronger or more specific. Actually, let's just generate the transitive impact and merge.
+
+            risk_signals = [RiskSignalType.BLOCKED_ENTITY, RiskSignalType.TRANSITIVE_DEPENDENCY]
+            sorted_signals = sorted(risk_signals, key=lambda s: s.value)
+            
+            # Determine impact level based on depth
+            if path.depth == 2:
+                impact_level = ImpactLevel.MEDIUM
+            else:
+                impact_level = ImpactLevel.LOW
+
+            reason = "Entity has a transitive dependency on an entity which is currently in a BLOCKED state."
+
+            # Calculate strength as minimum of edge strengths along the path? Or just 1?
+            # Let's use 1 for transitive paths to be safe, or min edge strength.
+            min_strength = min(edge.strength for edge in path.edges)
+
+            # Collect related meeting IDs across the path
+            all_meetings = set()
+            for edge in path.edges:
+                all_meetings.update(edge.related_meeting_ids)
+            related_meeting_ids = sorted(list(all_meetings))
+
+            # Generate ID
+            hash_input = f"{source_id}:{entity_id}:{impact_level.value}:{min_strength}:transitive".encode("utf-8")
+            impact_id = hashlib.sha256(hash_input).hexdigest()[:16]
+
+            level_map = {
+                ImpactLevel.CRITICAL: 4,
+                ImpactLevel.HIGH: 3,
+                ImpactLevel.MEDIUM: 2,
+                ImpactLevel.LOW: 1
+            }
+            sort_val = level_map[impact_level]
+            sort_key = f"{sort_val}_{min_strength:06d}_{source_id}_{entity_id}_{impact_id}"
+
+            impact = EntityImpact(
+                impact_id=impact_id,
+                source_entity_id=source_id,
+                impacted_entity_id=entity_id,
+                impact_level=impact_level,
+                risk_signals=sorted_signals,
+                relationship_strength=min_strength,
+                related_meeting_ids=related_meeting_ids,
+                reason=reason,
+                generated_from_at=current_time,
+                deterministic_sort_key=sort_key,
+                dependency_depth=path.depth,
+                dependency_path=path.entity_path,
+            )
+            transitive_impacts.append(impact)
+
+        # 5. Merge and deduplicate
+        all_impacts = {}
+        for imp in base_impacts:
+            # Set direct explicit dependencies to depth 1
+            if RiskSignalType.EXPLICIT_DEPENDENCY in imp.risk_signals and imp.dependency_depth is None:
+                imp.dependency_depth = 1
+                imp.dependency_path = [imp.impacted_entity_id, imp.source_entity_id]
+            all_impacts[imp.source_entity_id] = imp
+            
+        for imp in transitive_impacts:
+            source_id = imp.source_entity_id
+            if source_id in all_impacts:
+                # If there's already a base impact, we override it ONLY if the transitive impact
+                # is "stronger" or has a more specific signal. But base impact from co-occurrence
+                # might be HIGH (if attention is high).
+                # To be deterministic and safe: we'll merge signals if the new impact level is >= existing.
+                existing = all_impacts[source_id]
+                level_map = {ImpactLevel.CRITICAL: 4, ImpactLevel.HIGH: 3, ImpactLevel.MEDIUM: 2, ImpactLevel.LOW: 1}
+                if level_map[imp.impact_level] > level_map[existing.impact_level]:
+                    all_impacts[source_id] = imp
+                else:
+                    # Keep existing, but maybe add TRANSITIVE_DEPENDENCY signal?
+                    if RiskSignalType.TRANSITIVE_DEPENDENCY not in existing.risk_signals:
+                        signals = set(existing.risk_signals)
+                        signals.add(RiskSignalType.TRANSITIVE_DEPENDENCY)
+                        existing.risk_signals = sorted(list(signals), key=lambda s: s.value)
+                        if existing.dependency_depth is None:
+                            existing.dependency_depth = imp.dependency_depth
+                            existing.dependency_path = imp.dependency_path
+            else:
+                all_impacts[source_id] = imp
+
+        # Sort
+        final_impacts = list(all_impacts.values())
+        level_map = {ImpactLevel.CRITICAL: 4, ImpactLevel.HIGH: 3, ImpactLevel.MEDIUM: 2, ImpactLevel.LOW: 1}
+        final_impacts.sort(key=lambda i: (
+            -level_map[i.impact_level],
+            -i.relationship_strength,
+            i.source_entity_id,
+            i.impacted_entity_id,
+            i.impact_id
+        ))
+
+        return final_impacts

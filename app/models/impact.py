@@ -11,6 +11,7 @@ means they are associated and Entity A has a risk signal. It does NOT mean Entit
 from datetime import datetime
 from enum import Enum
 
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -24,6 +25,7 @@ class RiskSignalType(str, Enum):
     STALE_ENTITY = "STALE_ENTITY"
     REPEATED_OBSERVATION = "REPEATED_OBSERVATION"
     EXPLICIT_DEPENDENCY = "EXPLICIT_DEPENDENCY"
+    TRANSITIVE_DEPENDENCY = "TRANSITIVE_DEPENDENCY"
 
 
 class ImpactLevel(str, Enum):
@@ -82,6 +84,16 @@ class EntityImpact(BaseModel):
     generated_from_at: datetime = Field(
         ...,
         description="The timestamp when this impact was evaluated."
+    )
+    
+    dependency_depth: Optional[int] = Field(
+        default=None,
+        description="1 for direct explicit dependency, 2+ for transitive dependency, None for CO_OCCURS_WITH."
+    )
+    
+    dependency_path: Optional[list[str]] = Field(
+        default=None,
+        description="The entity IDs constituting the path from the source entity to the impacted entity."
     )
     
     deterministic_sort_key: str = Field(

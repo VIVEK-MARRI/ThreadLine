@@ -38,6 +38,7 @@ from app.services.entity_relationship_service import EntityRelationshipService
 from app.services.impact_analysis_service import ImpactAnalysisService
 from app.services.insight_service import InsightService
 from app.services.temporal_state_service import TemporalStateService
+from app.services.dependency_graph_service import DependencyGraphService
 from app.temporal.state_interpreter import KeywordStateInterpreter
 from app.temporal.transition_policy import DefaultTransitionPolicy
 
@@ -123,6 +124,8 @@ def _build_service(
     temp_svc = TemporalStateService(e_repo, m_repo, mtg_repo, interpreter, policy)
     insight_svc = InsightService(e_repo, m_repo, mtg_repo, interpreter, policy)
     attn_svc = AttentionService(e_repo, m_repo, mtg_repo, interpreter, policy)
+    
+    graph_svc = DependencyGraphService(d_repo, e_repo)
 
     return ImpactAnalysisService(
         entity_repo=e_repo,
@@ -130,6 +133,7 @@ def _build_service(
         temporal_service=temp_svc,
         insight_service=insight_svc,
         attention_service=attn_svc,
+        dependency_graph_service=graph_svc,
     )
 
 
@@ -406,3 +410,180 @@ def test_ip07_portfolio_with_explicit_dependency_impact() -> None:
     from app.models.portfolio import PortfolioRiskLevel
     # ea should be at least HIGH risk (has HIGH impact)
     assert summary_a.risk_level in (PortfolioRiskLevel.HIGH, PortfolioRiskLevel.CRITICAL)
+
+# ===========================================================================
+# Multi-Hop Impact Analysis (Stage 16)
+# ===========================================================================
+
+def test_ip08_transitive_depth_2_blocked():
+    """IP08: transitive dep depth-2, blocked -> MEDIUM impact + TRANSITIVE_DEPENDENCY."""
+    e_a = _make_entity("ea", "A")
+    e_b = _make_entity("eb", "B")
+    e_c = _make_entity("ec", "C")
+    mtg1 = _make_meeting("m1", _BASE_TIME)
+    mtg2 = _make_meeting("m2", _BASE_TIME)
+    mtg3 = _make_meeting("m3", _BASE_TIME)
+
+    mentions = [
+        _make_mention("mn1", "ea", "m1", "A depends on B"),
+        _make_mention("mn1_b", "eb", "m1", "B in m1"),
+        _make_mention("mn2", "eb", "m2", "B depends on C"),
+        _make_mention("mn2_c", "ec", "m2", "C in m2"),
+        _make_mention("mn3", "ec", "m3", "C is blocked"),
+    ]
+
+    deps = [
+        _make_dep("d1", "ea", "eb", RelationshipType.DEPENDS_ON, "mn1", "m1"),
+        _make_dep("d2", "eb", "ec", RelationshipType.DEPENDS_ON, "mn2", "m2"),
+    ]
+
+    svc = _build_service([e_a, e_b, e_c], [mtg1, mtg2, mtg3], mentions, deps)
+    
+    impacts = svc.get_entity_impacts_multi_hop("ea", _BASE_TIME, max_depth=3)
+    
+    assert len(impacts) == 1
+    imp = impacts[0]
+    assert imp.source_entity_id == "ec"
+    assert imp.impact_level == ImpactLevel.MEDIUM
+    assert RiskSignalType.TRANSITIVE_DEPENDENCY in imp.risk_signals
+    assert RiskSignalType.BLOCKED_ENTITY in imp.risk_signals
+    assert imp.dependency_depth == 2
+
+def test_ip09_transitive_depth_3_blocked():
+    """IP09: transitive dep depth-3, blocked -> LOW impact + TRANSITIVE_DEPENDENCY."""
+    e_a = _make_entity("ea", "A")
+    e_b = _make_entity("eb", "B")
+    e_c = _make_entity("ec", "C")
+    e_d = _make_entity("ed", "D")
+    mtg1 = _make_meeting("m1", _BASE_TIME)
+    mtg2 = _make_meeting("m2", _BASE_TIME)
+    mtg3 = _make_meeting("m3", _BASE_TIME)
+    mtg4 = _make_meeting("m4", _BASE_TIME)
+
+    mentions = [
+        _make_mention("mn1", "ea", "m1", "A depends on B"),
+        _make_mention("mn1_b", "eb", "m1", "B in m1"),
+        _make_mention("mn2", "eb", "m2", "B depends on C"),
+        _make_mention("mn2_c", "ec", "m2", "C in m2"),
+        _make_mention("mn3", "ec", "m3", "C depends on D"),
+        _make_mention("mn3_d", "ed", "m3", "D in m3"),
+        _make_mention("mn4", "ed", "m4", "D is blocked"),
+    ]
+
+    deps = [
+        _make_dep("d1", "ea", "eb", RelationshipType.DEPENDS_ON, "mn1", "m1"),
+        _make_dep("d2", "eb", "ec", RelationshipType.DEPENDS_ON, "mn2", "m2"),
+        _make_dep("d3", "ec", "ed", RelationshipType.DEPENDS_ON, "mn3", "m3"),
+    ]
+
+    svc = _build_service([e_a, e_b, e_c, e_d], [mtg1, mtg2, mtg3, mtg4], mentions, deps)
+    impacts = svc.get_entity_impacts_multi_hop("ea", _BASE_TIME, max_depth=3)
+    
+    assert len(impacts) == 1
+    imp = impacts[0]
+    assert imp.source_entity_id == "ed"
+    assert imp.impact_level == ImpactLevel.LOW
+    assert imp.dependency_depth == 3
+
+def test_ip10_two_paths_dedup():
+    """IP10: two paths to same blocked entity -> single impact record (dedup)."""
+    e_a = _make_entity("ea", "A")
+    e_b = _make_entity("eb", "B")
+    e_c = _make_entity("ec", "C")
+    e_d = _make_entity("ed", "D")
+    mtg1 = _make_meeting("m1", _BASE_TIME)
+    mtg2 = _make_meeting("m2", _BASE_TIME)
+    mtg3 = _make_meeting("m3", _BASE_TIME)
+    mtg4 = _make_meeting("m4", _BASE_TIME)
+    mtg5 = _make_meeting("m5", _BASE_TIME)
+
+    mentions = [
+        _make_mention("mn1", "ea", "m1", "A"),
+        _make_mention("mn1_b", "eb", "m1", "B"),
+        _make_mention("mn2", "eb", "m2", "B"),
+        _make_mention("mn2_d", "ed", "m2", "D"),
+        _make_mention("mn3", "ea", "m3", "A"),
+        _make_mention("mn3_c", "ec", "m3", "C"),
+        _make_mention("mn4", "ec", "m4", "C"),
+        _make_mention("mn4_d", "ed", "m4", "D"),
+        _make_mention("mn5", "ed", "m5", "D blocked"),
+    ]
+
+    deps = [
+        _make_dep("d1", "ea", "eb", RelationshipType.DEPENDS_ON, "mn1", "m1"),
+        _make_dep("d2", "eb", "ed", RelationshipType.DEPENDS_ON, "mn2", "m2"),
+        _make_dep("d3", "ea", "ec", RelationshipType.DEPENDS_ON, "mn3", "m3"),
+        _make_dep("d4", "ec", "ed", RelationshipType.DEPENDS_ON, "mn4", "m4"),
+    ]
+
+    svc = _build_service([e_a, e_b, e_c, e_d], [mtg1, mtg2, mtg3, mtg4, mtg5], mentions, deps)
+    impacts = svc.get_entity_impacts_multi_hop("ea", _BASE_TIME, max_depth=3)
+    
+    assert len(impacts) == 1
+    imp = impacts[0]
+    assert imp.source_entity_id == "ed"
+    assert imp.dependency_depth == 2
+
+def test_ip11_diamond_graph_no_double_count():
+    """IP11: diamond graph -> blocked D impacts A, not double-counted."""
+    test_ip10_two_paths_dedup()
+
+def test_ip12_no_backward_propagation():
+    """IP12: multi-hop blocked does not propagate backward."""
+    e_a = _make_entity("ea", "A")
+    e_b = _make_entity("eb", "B")
+    mtg1 = _make_meeting("m1", _BASE_TIME)
+    mtg2 = _make_meeting("m2", _BASE_TIME)
+
+    mentions = [
+        _make_mention("mn1", "ea", "m1", "A depends on B"),
+        _make_mention("mn1_b", "eb", "m1", "B in m1"),
+        _make_mention("mn2", "ea", "m2", "A is blocked"),
+    ]
+
+    deps = [
+        _make_dep("d1", "ea", "eb", RelationshipType.DEPENDS_ON, "mn1", "m1"),
+    ]
+
+    svc = _build_service([e_a, e_b], [mtg1, mtg2], mentions, deps)
+    impacts = svc.get_entity_impacts_multi_hop("eb", _BASE_TIME, max_depth=3)
+    
+    # B receives impact from A due to co-occurrence, but NOT from explicit backward dependency
+    assert len(impacts) == 1
+    imp = impacts[0]
+    assert imp.source_entity_id == "ea"
+    assert RiskSignalType.EXPLICIT_DEPENDENCY not in imp.risk_signals
+    assert RiskSignalType.TRANSITIVE_DEPENDENCY not in imp.risk_signals
+    assert imp.dependency_depth is None
+
+def test_ip13_e2e_3_entity_chain():
+    """IP13: end-to-end 3-entity chain."""
+    e_pay = _make_entity("ep", "Payment API")
+    e_db = _make_entity("edb", "Database Migration")
+    e_inf = _make_entity("einf", "Infrastructure Upgrade")
+    mtg1 = _make_meeting("m1", _BASE_TIME)
+    mtg2 = _make_meeting("m2", _BASE_TIME)
+    mtg3 = _make_meeting("m3", _BASE_TIME)
+
+    mentions = [
+        _make_mention("mn1", "ep", "m1", "Payment API"),
+        _make_mention("mn1_db", "edb", "m1", "Database Migration"),
+        _make_mention("mn2", "edb", "m2", "Database Migration"),
+        _make_mention("mn2_inf", "einf", "m2", "Infrastructure"),
+        _make_mention("mn3", "einf", "m3", "Infrastructure Upgrade blocked"),
+    ]
+
+    deps = [
+        _make_dep("d1", "ep", "edb", RelationshipType.DEPENDS_ON, "mn1", "m1"),
+        _make_dep("d2", "edb", "einf", RelationshipType.DEPENDS_ON, "mn2", "m2"),
+    ]
+
+    svc = _build_service([e_pay, e_db, e_inf], [mtg1, mtg2, mtg3], mentions, deps)
+    impacts = svc.get_entity_impacts_multi_hop("ep", _BASE_TIME, max_depth=3)
+    
+    assert len(impacts) == 1
+    imp = impacts[0]
+    assert imp.source_entity_id == "einf"
+    assert imp.impact_level == ImpactLevel.MEDIUM
+    assert imp.dependency_depth == 2
+    assert imp.dependency_path == ["ep", "edb", "einf"]
