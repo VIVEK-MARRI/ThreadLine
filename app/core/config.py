@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Which extraction provider to use.  Recognised values: "openai", "fake".
     extraction_provider: str = "openai"
 
+    # Which natural language provider to use. Recognised values: "openai", "fake".
+    nl_provider: str = "fake"
+
     model_config = ConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -11,6 +11,8 @@ from app.api.meetings import router as meetings_router
 from app.api.entities import router as entities_router
 from app.api.attention import router as attention_router
 from app.api.portfolio import router as portfolio_router
+from app.api.changes import router as changes_router
+from app.api.query import router as query_router
 from app.schemas.meeting import HealthResponse
 
 app = FastAPI(
@@ -31,6 +33,8 @@ app.include_router(meetings_router, prefix=settings.api_v1_prefix)
 app.include_router(entities_router, prefix=settings.api_v1_prefix)
 app.include_router(attention_router, prefix=settings.api_v1_prefix)
 app.include_router(portfolio_router, prefix=settings.api_v1_prefix)
+app.include_router(changes_router, prefix=settings.api_v1_prefix)
+app.include_router(query_router, prefix=settings.api_v1_prefix)
 
 
 # ---------------------------------------------------------------------------
