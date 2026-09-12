@@ -249,6 +249,45 @@ create jobs. Semantic indexing belongs to processing workers. The application
 worker starts only when `BACKGROUND_WORKER_ENABLED=true` and uses FastAPI's
 lifespan lifecycle; default tests and development keep it disabled.
 
+## Real Meeting Worker Flow (Stage 23.2)
+
+With `BACKGROUND_WORKER_ENABLED=true`, a persisted meeting follows this
+checkpointed flow:
+
+```text
+meeting source -> durable SQLite source -> durable job -> worker claim
+  -> extraction result persisted -> entity resolution
+  -> explicit dependency persistence -> derived intelligence evaluation
+  -> authoritative EvidenceItem construction -> semantic index upsert
+  -> COMPLETED / SUCCEEDED
+```
+
+The worker is deliberately an orchestrator: it invokes `ExtractionService`,
+`ResolutionService`, `DependencyResolutionService`, the established derived
+read-model services, `EvidenceRetrievalService`, and
+`SemanticIndexingService`. A checkpoint is written only after its service call
+has completed successfully. A retry resumes after the last durable checkpoint.
+
+Extraction results do not currently contain an entity-mention representation,
+and ThreadLine intentionally never creates canonical entities from prose.
+Consequently the resolution stage processes only durable mentions already
+recorded for that meeting, preserving `RESOLVED`, `AMBIGUOUS`, and
+`UNRESOLVED` semantics. Explicit dependencies are likewise created only by
+the existing explicit-statement resolver; co-occurrence and vector similarity
+never create them.
+
+The existing memory, insight, attention, action, timeline, portfolio, impact,
+and organisation-change services are deterministic read models over durable
+source facts, not persisted derived tables. The worker evaluates that existing
+service graph and indexes its authoritative evidence; it does not invent a
+second derived-data store. Semantic index records remain rebuildable derived
+data, and `/api/v1/query` remains read-only: it does not index, enqueue jobs,
+or mutate source/derived truth.
+
+Worker execution remains process-local. Durable SQLite jobs, source records,
+and persistent semantic-index records survive application restart, but this is
+not a distributed-worker or exactly-once-execution claim.
+
 ---
 
 ## Candidate Generation

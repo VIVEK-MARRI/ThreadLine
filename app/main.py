@@ -26,6 +26,28 @@ from app.models.background_job import BackgroundJobType
 from app.services.background_worker_service import BackgroundWorkerService
 from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
 from app.api.meetings import get_extraction_service
+from app.api.meetings import _extraction_repository
+from app.api.entities import (
+    _dependency_repository,
+    _entity_repository,
+    _mention_repository,
+    get_action_recommendation_service,
+    get_attention_service,
+    get_correlation_service,
+    get_dependency_graph_service,
+    get_entity_relationship_service,
+    get_impact_analysis_service,
+    get_insight_service,
+    get_organisational_memory_service,
+    get_portfolio_intelligence_service,
+    get_resolution_service,
+    get_temporal_state_service,
+    get_unified_timeline_service,
+)
+from app.api.changes import get_organisation_change_intelligence_service
+from app.api.query import _semantic_indexing_service, get_evidence_retrieval_service
+from app.services.dependency_resolution_service import DependencyResolutionService
+from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrator
 
 _application_worker: BackgroundWorkerService | None = None
 _worker_thread: threading.Thread | None = None
@@ -35,15 +57,60 @@ _worker_stop = threading.Event()
 def _build_application_worker() -> BackgroundWorkerService:
     repository = get_job_repository()
 
+    correlation = get_correlation_service()
+    temporal = get_temporal_state_service()
+    memory = get_organisational_memory_service()
+    insights = get_insight_service()
+    attention = get_attention_service()
+    actions = get_action_recommendation_service()
+    timeline = get_unified_timeline_service()
+    relationships = get_entity_relationship_service()
+    dependency_graph = get_dependency_graph_service()
+    impact = get_impact_analysis_service()
+    changes = get_organisation_change_intelligence_service()
+    portfolio = get_portfolio_intelligence_service()
+    evidence = get_evidence_retrieval_service(
+        timeline_svc=timeline, memory_svc=memory, insight_svc=insights,
+        attention_svc=attention, action_svc=actions,
+        dependency_graph_svc=dependency_graph, impact_svc=impact,
+        org_change_svc=changes, portfolio_svc=portfolio,
+        relationship_svc=relationships,
+    )
+    dependency_resolution = DependencyResolutionService(
+        entity_repo=_entity_repository,
+        mention_repo=_mention_repository,
+        dependency_repo=_dependency_repository,
+    )
+    pipeline = MeetingPipelineOrchestrator(
+        extraction_repository=_extraction_repository,
+        mention_repository=_mention_repository,
+        resolution_service=get_resolution_service(),
+        dependency_resolution_service=dependency_resolution,
+        evidence_retrieval_service=evidence,
+        semantic_indexing_service=_semantic_indexing_service,
+        derived_services=(
+            lambda entity_id, now: correlation.get_entity_correlations(entity_id),
+            lambda entity_id, now: temporal.get_entity_timeline(entity_id),
+            lambda entity_id, now: memory.get_entity_memory(entity_id),
+            lambda entity_id, now: insights.get_entity_insights(entity_id, now),
+            lambda entity_id, now: attention.get_entity_attention(entity_id, now),
+            lambda entity_id, now: actions.get_entity_actions(entity_id, now),
+            lambda entity_id, now: timeline.get_unified_timeline(entity_id),
+            lambda entity_id, now: relationships.get_relationship_graph(entity_id),
+            lambda entity_id, now: dependency_graph.build_dependency_graph(entity_id),
+            lambda entity_id, now: impact.get_entity_impacts(entity_id, now),
+            lambda entity_id, now: changes.get_changes(current_time=now, entity_id=entity_id),
+            lambda entity_id, now: portfolio.get_portfolio(now),
+        ),
+    )
+
     def process_meeting(job):
         handlers = {
             ProcessingStage.EXTRACTED: lambda meeting_id: get_extraction_service().extract_meeting(meeting_id),
-            # These handlers are explicit lifecycle boundaries. Domain-specific
-            # resolution/derived services remain independently retryable.
-            ProcessingStage.RESOLVED: lambda meeting_id: None,
-            ProcessingStage.RELATIONSHIPS_PERSISTED: lambda meeting_id: None,
-            ProcessingStage.DERIVED_INTELLIGENCE: lambda meeting_id: None,
-            ProcessingStage.SEMANTIC_INDEXED: lambda meeting_id: None,
+            ProcessingStage.RESOLVED: pipeline.resolve_meeting,
+            ProcessingStage.RELATIONSHIPS_PERSISTED: pipeline.persist_relationships,
+            ProcessingStage.DERIVED_INTELLIGENCE: pipeline.derive_intelligence,
+            ProcessingStage.SEMANTIC_INDEXED: pipeline.index_semantic_evidence,
         }
         MeetingProcessingService(repository, handlers).process(job)
 

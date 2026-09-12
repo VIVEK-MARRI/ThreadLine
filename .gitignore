@@ -23,6 +23,7 @@ ENV/
 
 # Testing & coverage
 .pytest_cache/
+.stage232*_pytest/
 .coverage
 htmlcov/
 .tox/
