@@ -70,7 +70,7 @@ class EvidenceContextBuilder:
         def sort_key(item: EvidenceItem):
             # severity_weight DESC (negated for ASC sort)
             # type_priority ASC
-            # timestamp DESC (None -> very old epoch for sorting)
+            # timestamp DESC; evidence without an event timestamp sorts last.
             # evidence_id ASC
             ts = item.timestamp.timestamp() if item.timestamp else -1.0
             return (

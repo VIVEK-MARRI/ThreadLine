@@ -14,6 +14,10 @@ from app.repositories.meeting_repository import AbstractMeetingRepository
 from app.schemas.meeting import MeetingIngestRequest
 
 
+class MeetingConflictError(ValueError):
+    """A stable meeting ID was reused with a different payload."""
+
+
 class MeetingService:
     """Encapsulates all meeting-related business operations."""
 
@@ -30,8 +34,21 @@ class MeetingService:
         4. Persist via the repository.
         5. Return the saved domain model.
         """
+        meeting_id = request.meeting_id or str(uuid.uuid4())
+        existing = self._repository.get_by_id(meeting_id)
+        if existing is not None:
+            if (
+                existing.title != request.title
+                or existing.transcript != request.transcript
+                or existing.meeting_date != request.meeting_date
+                or existing.participants != (request.participants or [])
+            ):
+                raise MeetingConflictError(
+                    f"Meeting '{meeting_id}' already exists with a different payload."
+                )
+            return existing
         meeting = Meeting(
-            meeting_id=request.meeting_id or str(uuid.uuid4()),
+            meeting_id=meeting_id,
             title=request.title,
             transcript=request.transcript,
             meeting_date=request.meeting_date,

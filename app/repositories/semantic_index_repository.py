@@ -16,6 +16,12 @@ from typing import Optional
 from app.models.semantic_index import SemanticIndexRecord
 
 
+def _similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+    return max(0.0, min(1.0, sum(a * b for a, b in zip(vec_a, vec_b))))
+
+
 class AbstractSemanticIndexRepository(ABC):
     """Repository for semantic index records.
 
@@ -185,6 +191,14 @@ class AbstractSemanticIndexRepository(ABC):
         """
         ...
 
+    @abstractmethod
+    def search_similar(
+        self, query_embedding: list[float], embedding_model: str,
+        representation_version: str, top_k: int, min_similarity: float,
+    ) -> list[tuple[SemanticIndexRecord, float]]:
+        """Search active model/version vectors by application-side similarity."""
+        ...
+
     def count_by_model(self, embedding_model: str) -> int:
         """Count records for a given model.
 
@@ -305,6 +319,16 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
     def count(self) -> int:
         """Count total records."""
         return len(self._records)
+
+    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity):
+        matches = []
+        for record in self._records.values():
+            if record.embedding_model != embedding_model or record.representation_version != representation_version:
+                continue
+            score = _similarity(query_embedding, record.embedding)
+            if score >= min_similarity:
+                matches.append((record, score))
+        return sorted(matches, key=lambda item: (-item[1], item[0].evidence_id))[:top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -433,3 +457,14 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
     def count(self) -> int:
         with self._lock:
             return len(self._records)
+
+    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity):
+        with self._lock:
+            matches = []
+            for record in self._records.values():
+                if record.embedding_model != embedding_model or record.representation_version != representation_version:
+                    continue
+                score = _similarity(query_embedding, record.embedding)
+                if score >= min_similarity:
+                    matches.append((record, score))
+            return sorted(matches, key=lambda item: (-item[1], item[0].evidence_id))[:top_k]

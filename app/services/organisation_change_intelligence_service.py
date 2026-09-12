@@ -45,7 +45,7 @@ R9  RISK_DEESCALATED     -- InsightType.ISSUE_RESOLVED.
                            all organisational risk has been removed.
 R10 NEW_DEPENDENCY       -- ExplicitDependency records (DEPENDS_ON or BLOCKS only).
                            detected_at = meeting.meeting_date from the dependency's meeting_id.
-                           Fallback to epoch sentinel if meeting cannot be resolved.
+                           Leave detected_at unset when no meeting can be resolved.
 R11 DEPENDENCY_OBSERVED  -- DependencyGraphService transitive paths (depth >= 2).
                            SEMANTICS: Records that a transitive path EXISTS, not that it
                            recently appeared or expanded. Stored as DEPENDENCY_EXPANDED for
@@ -322,9 +322,8 @@ class OrganisationChangeIntelligenceService:
             Days threshold for STALE_ENTITY detection. Default: 30.
         start_date:
             Only return changes with detected_at >= start_date (inclusive).
-            Note: graph-level changes (DEPENDENCY_EXPANDED, IMPACT_EXPANDED) use
-            the epoch sentinel (1970-01-01) as detected_at. These will be excluded
-            by any start_date filter set to a real date.
+            Note: graph-level changes (DEPENDENCY_EXPANDED, IMPACT_EXPANDED) have
+            no single event timestamp and are handled explicitly by date filters.
         end_date:
             Only return changes with detected_at <= end_date (inclusive).
         change_type:

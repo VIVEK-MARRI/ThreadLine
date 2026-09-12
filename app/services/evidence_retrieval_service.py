@@ -129,7 +129,6 @@ class EvidenceRetrievalService:
         org_change_svc: OrganisationChangeIntelligenceService,
         portfolio_svc: PortfolioIntelligenceService,
         relationship_svc: EntityRelationshipService,
-        semantic_indexing_svc=None,
     ) -> None:
         self._entity_repo = entity_repo
         self._meeting_repo = meeting_repo
@@ -143,7 +142,6 @@ class EvidenceRetrievalService:
         self._org_change_svc = org_change_svc
         self._portfolio_svc = portfolio_svc
         self._relationship_svc = relationship_svc
-        self._semantic_indexing_svc = semantic_indexing_svc
 
     def retrieve_evidence(
         self,
@@ -223,10 +221,29 @@ class EvidenceRetrievalService:
                 items.extend(self._fetch_portfolio_evidence(intent, current_time, risk_only=True))
                 items.extend(self._fetch_top_attention_evidence(intent, current_time, max_items))
 
-        if self._semantic_indexing_svc is not None and items:
-            self._semantic_indexing_svc.index_evidence_batch(items)
-
         return items
+
+    def build_semantic_corpus(self, current_time: datetime, include_source_text: bool = True) -> list[EvidenceItem]:
+        """Build the authoritative, read-only evidence corpus for semantic lookup."""
+        items: list[EvidenceItem] = []
+        entities = self._entity_repo.list_entities()
+        entity_intents = [
+            QueryIntent.ENTITY_STATUS, QueryIntent.ENTITY_HISTORY,
+            QueryIntent.ENTITY_RISKS, QueryIntent.ENTITY_DEPENDENCIES,
+            QueryIntent.ENTITY_IMPACTS, QueryIntent.ENTITY_ACTIONS,
+            QueryIntent.ENTITY_CHANGES,
+        ]
+        for entity in entities:
+            for intent in entity_intents:
+                items.extend(self.retrieve_evidence(intent, entity.entity_id, current_time, 1000, include_source_text))
+        for intent in (
+            QueryIntent.ORGANISATION_CHANGES,
+            QueryIntent.ORGANISATION_PRIORITIES,
+            QueryIntent.ORGANISATION_RISKS,
+        ):
+            items.extend(self.retrieve_evidence(intent, None, current_time, 1000, include_source_text))
+        unique = {item.evidence_id: item for item in items}
+        return list(unique.values())
 
     # -----------------------------------------------------------------------
     # Builders

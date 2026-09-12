@@ -5,6 +5,7 @@ from typing import Callable
 
 from app.models.background_job import BackgroundJob
 from app.repositories.background_job_repository import AbstractBackgroundJobRepository
+from app.services.background_worker_service import PermanentJobError
 
 
 class ProcessingStage(StrEnum):
@@ -41,7 +42,11 @@ class MeetingProcessingService:
             except ValueError:
                 current_index = -1
         for stage in self._stages[current_index + 1:]:
+            if stage == ProcessingStage.COMPLETED:
+                self._repository.checkpoint(job.job_id, stage.value)
+                continue
             handler = self._handlers.get(stage)
-            if handler is not None:
-                handler(job.payload_id)
+            if handler is None:
+                raise PermanentJobError(f"missing processing handler for stage {stage.value}")
+            handler(job.payload_id)
             self._repository.checkpoint(job.job_id, stage.value)

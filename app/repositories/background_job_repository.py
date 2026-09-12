@@ -226,12 +226,14 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             "worker_id": fields.get("worker_id", current.worker_id),
         }
         with self._store.transaction() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """UPDATE background_jobs SET status=?, completed_at=?, last_error=?, error_type=?,
-                   next_retry_at=?, lease_until=?, worker_id=? WHERE job_id=?""",
+                   next_retry_at=?, lease_until=?, worker_id=? WHERE job_id=? AND status=?""",
                 (values["status"], values["completed_at"], values["last_error"], values["error_type"],
-                 values["next_retry_at"], values["lease_until"], values["worker_id"], job_id),
+                 values["next_retry_at"], values["lease_until"], values["worker_id"], job_id, current.status.value),
             )
+            if updated.rowcount != 1:
+                raise InvalidJobTransition("job state changed before transition")
         return self.get(job_id)
 
     def checkpoint(self, job_id: str, stage: str) -> BackgroundJob:

@@ -78,15 +78,18 @@ class BackgroundWorkerService:
             return None
         current = now or datetime.now(timezone.utc)
         self.recover(current)
-        candidates = self._repository.list()
         candidates = [
-            job for job in candidates
+            job for job in self._repository.list()
             if job.status in {BackgroundJobStatus.PENDING, BackgroundJobStatus.RETRY_WAITING}
             and (job.next_retry_at is None or job.next_retry_at <= current)
         ]
         if not candidates:
             return None
-        claimed = self._repository.claim(candidates[0].job_id, self._worker_id, current, self._lease_seconds)
+        claimed = None
+        for candidate in candidates:
+            claimed = self._repository.claim(candidate.job_id, self._worker_id, current, self._lease_seconds)
+            if claimed is not None:
+                break
         if claimed is None:
             return None
         logger.info("job_claimed job_id=%s attempt=%s", claimed.job_id, claimed.attempts)

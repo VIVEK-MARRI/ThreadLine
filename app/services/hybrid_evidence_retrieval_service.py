@@ -74,6 +74,7 @@ class HybridEvidenceRetrievalService:
         self,
         structured_service: EvidenceRetrievalService,
         semantic_service: SemanticEvidenceRetrievalService,
+        semantic_corpus_provider=None,
     ) -> None:
         """
         Parameters
@@ -85,6 +86,7 @@ class HybridEvidenceRetrievalService:
         """
         self._structured = structured_service
         self._semantic = semantic_service
+        self._semantic_corpus_provider = semantic_corpus_provider
 
     def retrieve_evidence(
         self,
@@ -143,18 +145,31 @@ class HybridEvidenceRetrievalService:
             # No semantic search; return structured only
             return self._rank_evidence(structured_items)
 
-        # 3. Perform semantic search (if structured gave us a baseline)
+        # 3. Perform semantic search over the persisted corpus, not only the
+        # structured result set. The source provider rehydrates authoritative items.
         semantic_candidates = []
-        if structured_items:
+        if self._semantic_corpus_provider is not None:
             try:
-                semantic_matches = self._semantic.search(
+                semantic_matches = self._semantic.search_persisted(
                     query=query_text,
-                    evidence_items=structured_items,
+                    source_lookup={item.evidence_id: item for item in self._semantic_corpus_provider(current_time)}.get,
                     top_k=max_items,
                 )
                 semantic_candidates = [match.evidence for match in semantic_matches]
+                if entity_id is not None:
+                    structured_ids = {item.evidence_id for item in structured_items}
+                    semantic_candidates = [
+                        item for item in semantic_candidates
+                        if item.entity_id == entity_id or item.evidence_id in structured_ids
+                    ]
             except Exception as e:
                 # Semantic search failure should not block structured results
+                logger.warning(f"Semantic retrieval failed: {e}")
+        elif structured_items:
+            try:
+                semantic_matches = self._semantic.search(query_text, structured_items, max_items)
+                semantic_candidates = [match.evidence for match in semantic_matches]
+            except Exception as e:
                 logger.warning(f"Semantic retrieval failed: {e}")
 
         # 4. Merge structured + semantic

@@ -45,7 +45,7 @@ from app.schemas.meeting import (
     MeetingResponse,
 )
 from app.services.extraction_service import ExtractionService, MeetingNotFoundError
-from app.services.meeting_service import MeetingService
+from app.services.meeting_service import MeetingConflictError, MeetingService
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,10 @@ def ingest_meeting(
     service: MeetingService = Depends(get_meeting_service),
 ) -> MeetingIngestResponse:
     """Ingest a meeting and return its assigned ID."""
-    meeting = service.ingest_meeting(request)
+    try:
+        meeting = service.ingest_meeting(request)
+    except MeetingConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     # Source persistence completes before the durable processing job is queued.
     from app.api.jobs import get_job_scheduler
 

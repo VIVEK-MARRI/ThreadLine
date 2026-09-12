@@ -164,6 +164,7 @@ def get_natural_language_query_service(
     hybrid_service = HybridEvidenceRetrievalService(
         structured_service=retrieval_svc,
         semantic_service=semantic_service,
+        semantic_corpus_provider=lambda current_time: retrieval_svc.build_semantic_corpus(current_time),
     )
     return NaturalLanguageQueryService(
         intent_svc=_intent_service,

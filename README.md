@@ -21,7 +21,7 @@ Meeting Ingestion → Information Extraction → Entity Resolution
     → Organisation-Wide Portfolio Intelligence
 ```
 
-**Today's implementation** covers the first sixteen stages: meeting ingestion/retrieval, evidence-backed information extraction, the Entity Resolution Foundation (canonical entity registry + mention tracking), Candidate Generation (lexical shortlisting), Candidate Scoring (explainable lexical evaluation), the **Resolution Decision Engine** (deterministic, safe resolution with explicit RESOLVED / AMBIGUOUS / UNRESOLVED outcomes), **Cross-Meeting Correlation** (read-only aggregation of a resolved entity's history across meetings), the **Temporal State Engine** (deterministic, evidence-backed lifecycle state tracking across time), **Organisational Memory** (deterministic read-only aggregation of an entity's complete structured knowledge and history), the **Insight & Change Detection Engine** (read-only derivation of actionable changes and risks), the **Prioritization & Attention Engine** (read-only aggregation of signals to identify critical entities), the **Entity Relationship Engine** (inferring both co-occurrence relationships and explicit `DEPENDS_ON`/`BLOCKS` dependencies), the **Dependency Graph Engine & Multi-Hop Impact Analysis** (resolving transitive dependency paths, cycle detection, and propagating risk signals securely across logical graphs), and **Organisation-Wide Portfolio Intelligence** (macro-level insights and systemic risk aggregation).
+**Current implementation** covers Stages 1–23.1: meeting ingestion/retrieval, evidence-backed information extraction, conservative entity resolution, temporal and derived organisational intelligence, durable SQLite source storage, durable job state with a process-local worker, corpus-wide persisted semantic retrieval, and the natural-language query interface. Structured organisational evidence remains authoritative; semantic vectors remain derived data.
 
 ---
 
@@ -234,6 +234,20 @@ this stage does not claim distributed execution, exactly-once processing, or
 zero data loss under machine failure. A future deployment can replace the
 worker adapter with a queue-backed implementation while retaining the job
 repository and state-machine contracts.
+
+## Core Pipeline Correctness (Stage 23.1)
+
+Semantic retrieval searches the full active persisted vector corpus for the
+configured model and representation version. Matches are rehydrated through
+the authoritative evidence layer, stale hashes and orphan IDs are discarded,
+and resolved-entity searches are conservatively limited to same-entity or
+already structured evidence. Ambiguous entities skip semantic retrieval and
+unknown intent remains provider-free.
+
+The query path is read-only: it does not index evidence, write source data, or
+create jobs. Semantic indexing belongs to processing workers. The application
+worker starts only when `BACKGROUND_WORKER_ENABLED=true` and uses FastAPI's
+lifespan lifecycle; default tests and development keep it disabled.
 
 ---
 
@@ -1765,4 +1779,4 @@ tests/
 - **Shared repository singletons:** The meetings and entities routers share the same `MeetingRepository` instance via a `get_meeting_repository()` accessor exported from `meetings.py`. This ensures correlation and temporal queries see all ingested meetings.
 - **Score ≠ probability:** Lexical similarity scores are outputs of the scoring function. They are explicitly documented as non-probabilistic throughout the codebase.
 - **Safe abstention:** The system prefers AMBIGUOUS/UNRESOLVED over incorrect RESOLVED. Incorrect entity assignments are harder to fix than unresolved mentions.
-- **Storage today:** Simple in-memory dictionaries. Suitable for development and testing only.
+- **Storage:** SQLite is the opt-in durable source-of-truth backend; in-memory repositories remain the default test/development fallback. Semantic vectors use the derived JSON index. Background jobs are durable in SQLite, while execution remains process-local.

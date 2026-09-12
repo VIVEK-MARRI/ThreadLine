@@ -227,6 +227,45 @@ class SemanticEvidenceRetrievalService:
         # 5. Return top-K
         return ranked[:top_k]
 
+    def search_persisted(
+        self,
+        query: str,
+        source_lookup,
+        top_k: int = 5,
+    ) -> list[SemanticEvidenceMatch]:
+        """Search the full active persisted corpus and rehydrate source items.
+
+        ``source_lookup`` must return the authoritative EvidenceItem for an
+        evidence ID, or None when the source item no longer exists. Stale
+        records are excluded without indexing or mutating any repository.
+        """
+        if not query or not query.strip():
+            raise ValueError("query must not be empty")
+        if top_k <= 0:
+            raise ValueError("top_k must be > 0")
+        if self._repository is None:
+            return []
+        query_embedding = self._embedding_provider.embed_text(query.strip())
+        from app.services.semantic_indexing_service import SemanticIndexingService
+
+        matches = []
+        for record, score in self._repository.search_similar(
+            query_embedding, self._embedding_model_name,
+            self._representation_version,
+            max(top_k, self._repository.count_by_model(self._embedding_model_name)),
+            self._min_similarity,
+        ):
+            evidence = source_lookup(record.evidence_id)
+            if evidence is None:
+                continue
+            expected_hash = SemanticIndexingService._compute_representation_hash(
+                self._make_evidence_representation(evidence)
+            )
+            if expected_hash != record.representation_hash:
+                continue
+            matches.append(SemanticEvidenceMatch(record.evidence_id, score, evidence))
+        return sorted(matches, key=lambda item: (-item.semantic_similarity_score, item.evidence_id))[:top_k]
+
     @staticmethod
     def _make_evidence_representation(item: EvidenceItem) -> str:
         """Create a deterministic text representation of an evidence item for embedding.
