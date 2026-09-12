@@ -21,6 +21,10 @@ class MeetingIngestRequest(BaseModel):
         default=None,
         description="Optional list of participant names.",
     )
+    meeting_id: Optional[str] = Field(
+        default=None,
+        description="Optional stable ID for idempotent re-ingestion.",
+    )
 
     @field_validator("title")
     @classmethod

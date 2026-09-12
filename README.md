@@ -157,6 +157,84 @@ spaces. Application startup initializes the repository only; it does not
 re-embed the corpus. Full repair/rebuild remains an internal service workflow,
 not a normal-user API endpoint.
 
+## Durable Source Storage (Stage 22)
+
+ThreadLine has an opt-in, single-backend SQLite source store for primary
+organisational data. Enable it with:
+
+```text
+SOURCE_REPOSITORY_BACKEND=database
+SOURCE_DATABASE_PATH=.threadline/threadline.db
+```
+
+The database contains meetings, extraction results, canonical entities, entity
+mentions, and explicit dependencies. Existing repository interfaces are
+unchanged; SQLite adapters sit behind them and preserve existing IDs. Foreign
+keys and transactions prevent partial source writes. Re-running a meeting with
+the same supplied `meeting_id` is an idempotent upsert; legacy requests
+without one retain UUID generation.
+
+Primary source data and derived intelligence are intentionally separate:
+
+```text
+SQLite source database
+  -> structured services and rebuildable intelligence
+  -> JSON semantic index (derived only)
+  -> natural-language query
+```
+
+Memory, insights, attention, actions, timelines, organisation changes,
+impacts, relationships, and embeddings remain derived/reconstructible. In
+particular, `CO_OCCURS_WITH` relationships are computed from durable mentions
+and are not persisted as causal facts. A failed extraction or embedding
+provider never deletes a durable meeting. `/health/diagnostics` reports source,
+semantic-index, and background-subsystem availability without exposing storage
+credentials or database internals.
+
+Stage 22 also provides a bounded in-process `BackgroundJobService` for meeting
+processing, derived rebuilds, and semantic indexing. Job identity is stable by
+type and payload, attempts are bounded, retries are logged, and completed jobs
+are idempotent. It is intentionally not a distributed queue.
+
+## Reliable Background Processing (Stage 23)
+
+Stage 23 persists job state in the same SQLite source database. Enable the
+worker configuration explicitly when an application process is responsible for
+polling jobs:
+
+```text
+BACKGROUND_WORKER_ENABLED=false
+BACKGROUND_POLL_INTERVAL_SECONDS=1.0
+BACKGROUND_MAX_ATTEMPTS=3
+BACKGROUND_LEASE_SECONDS=60
+```
+
+Each logical job is identified by `(job_type, payload_id)`. The durable
+repository enforces explicit transitions among `PENDING`, `RUNNING`,
+`RETRY_WAITING`, `SUCCEEDED`, `FAILED`, and `CANCELLED`. SQLite transaction
+claiming permits only one worker to claim a pending job at a time. A lease
+expiry makes crashed `RUNNING` work recoverable; retries use deterministic
+exponential backoff and stop at the configured attempt limit.
+
+Meeting processing uses durable checkpoints: `EXTRACTED`, `RESOLVED`,
+`RELATIONSHIPS_PERSISTED`, `DERIVED_INTELLIGENCE`, `SEMANTIC_INDEXED`, and
+`COMPLETED`. Reprocessing skips completed stages and relies on existing source
+IDs/upserts. Source meeting persistence always precedes job enqueue and
+derived processing. Extraction, derived-intelligence, or embedding failures
+never delete source truth.
+
+`GET /api/v1/health/jobs` and `/health/diagnostics` expose safe queue counts,
+oldest pending age, and stale-running counts. They do not expose stack traces,
+transcripts, credentials, or provider prompts. Query endpoints remain
+read-only; semantic indexing is a worker concern, not a hidden query side
+effect.
+
+The worker is still process-local. Durable jobs survive process restart, but
+this stage does not claim distributed execution, exactly-once processing, or
+zero data loss under machine failure. A future deployment can replace the
+worker adapter with a queue-backed implementation while retaining the job
+repository and state-machine contracts.
+
 ---
 
 ## Candidate Generation

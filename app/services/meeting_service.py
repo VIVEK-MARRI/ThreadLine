@@ -31,12 +31,13 @@ class MeetingService:
         5. Return the saved domain model.
         """
         meeting = Meeting(
-            meeting_id=str(uuid.uuid4()),
+            meeting_id=request.meeting_id or str(uuid.uuid4()),
             title=request.title,
             transcript=request.transcript,
             meeting_date=request.meeting_date,
             participants=request.participants or [],
             ingested_at=datetime.now(tz=timezone.utc),
+            idempotency_key=request.meeting_id,
         )
         self._repository.save(meeting)
         return meeting

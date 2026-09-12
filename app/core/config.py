@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     embedding_provider: str = "fake"
     active_embedding_model: str = "fake"
     active_representation_version: str = "1.0"
+    source_repository_backend: str = "in_memory"
+    source_database_path: str = ".threadline/threadline.db"
+    background_worker_enabled: bool = False
+    background_poll_interval_seconds: float = 1.0
+    background_max_attempts: int = 3
+    background_lease_seconds: int = 60
 
     model_config = ConfigDict(
         env_file=".env",

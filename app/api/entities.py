@@ -40,6 +40,13 @@ from app.models.entity import (
 from app.repositories.entity_repository import InMemoryEntityRepository
 from app.repositories.mention_repository import InMemoryMentionRepository
 from app.repositories.dependency_repository import InMemoryDependencyRepository
+from app.core.config import settings
+from app.api.meetings import get_source_store
+from app.repositories.sqlite_source_repositories import (
+    SQLiteDependencyRepository,
+    SQLiteEntityRepository,
+    SQLiteMentionRepository,
+)
 from app.entity_resolution.lexical_candidate_generator import LexicalCandidateGenerator
 from app.schemas.entity import (
     CandidatesResponse,
@@ -135,9 +142,17 @@ router = APIRouter(prefix="/entities", tags=["Entities"])
 # Shared repository singletons
 # (When we move to PostgreSQL we'll replace these with session-scoped factories.)
 # ---------------------------------------------------------------------------
-_entity_repository = InMemoryEntityRepository()
-_mention_repository = InMemoryMentionRepository()
-_dependency_repository = InMemoryDependencyRepository()
+_shared_source_store = get_source_store()
+if settings.source_repository_backend.lower() == "database":
+    if _shared_source_store is None:
+        raise RuntimeError("Database source backend was not initialized")
+    _entity_repository = SQLiteEntityRepository(_shared_source_store)
+    _mention_repository = SQLiteMentionRepository(_shared_source_store)
+    _dependency_repository = SQLiteDependencyRepository(_shared_source_store)
+else:
+    _entity_repository = InMemoryEntityRepository()
+    _mention_repository = InMemoryMentionRepository()
+    _dependency_repository = InMemoryDependencyRepository()
 
 # Shared meeting repository — imported from the meetings router so that
 # correlation queries see meetings ingested via POST /meetings.

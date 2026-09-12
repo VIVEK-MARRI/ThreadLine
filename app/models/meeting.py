@@ -33,6 +33,10 @@ class Meeting(BaseModel):
     ingested_at: datetime = Field(
         ..., description="UTC timestamp when this record was created in Threadline."
     )
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        description="Stable client-supplied identity for idempotent ingestion.",
+    )
 
     # ------------------------------------------------------------------
     # Extensibility note

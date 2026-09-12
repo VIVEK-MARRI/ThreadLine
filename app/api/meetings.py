@@ -8,6 +8,7 @@ ExtractionService.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from app.models.background_job import BackgroundJobType
 
 from app.core.config import settings
 from app.extraction.base import (
@@ -23,6 +24,12 @@ from app.repositories.extraction_repository import (
 from app.repositories.meeting_repository import (
     AbstractMeetingRepository,
     InMemoryMeetingRepository,
+)
+from app.persistence.sqlite_store import SQLiteSourceStore
+from app.persistence.source_backend import build_sqlite_source_store
+from app.repositories.sqlite_source_repositories import (
+    SQLiteExtractionRepository,
+    SQLiteMeetingRepository,
 )
 from app.schemas.extraction import (
     DecisionSchema,
@@ -48,8 +55,14 @@ router = APIRouter(prefix="/meetings", tags=["Meetings"])
 # Shared repository singletons
 # (When we move to PostgreSQL we'll replace these with session-scoped factories.)
 # ---------------------------------------------------------------------------
-_meeting_repository: AbstractMeetingRepository = InMemoryMeetingRepository()
-_extraction_repository: AbstractExtractionRepository = InMemoryExtractionRepository()
+_source_store: SQLiteSourceStore | None = None
+if settings.source_repository_backend.lower() == "database":
+    _source_store = build_sqlite_source_store()
+    _meeting_repository: AbstractMeetingRepository = SQLiteMeetingRepository(_source_store)
+    _extraction_repository: AbstractExtractionRepository = SQLiteExtractionRepository(_source_store)
+else:
+    _meeting_repository = InMemoryMeetingRepository()
+    _extraction_repository = InMemoryExtractionRepository()
 
 
 def get_meeting_repository() -> AbstractMeetingRepository:
@@ -60,6 +73,11 @@ def get_meeting_repository() -> AbstractMeetingRepository:
     duplicating the singleton and keeps all meeting data in one store.
     """
     return _meeting_repository
+
+
+def get_source_store() -> SQLiteSourceStore | None:
+    """Return the shared durable store when database mode is enabled."""
+    return _source_store
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +207,10 @@ def ingest_meeting(
 ) -> MeetingIngestResponse:
     """Ingest a meeting and return its assigned ID."""
     meeting = service.ingest_meeting(request)
+    # Source persistence completes before the durable processing job is queued.
+    from app.api.jobs import get_job_scheduler
+
+    get_job_scheduler().enqueue(BackgroundJobType.MEETING_PROCESSING, meeting.meeting_id)
     return MeetingIngestResponse(meeting_id=meeting.meeting_id, status="ingested")
 
 

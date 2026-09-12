@@ -148,7 +148,6 @@ def get_evidence_retrieval_service(
         org_change_svc=org_change_svc,
         portfolio_svc=portfolio_svc,
         relationship_svc=relationship_svc,
-        semantic_indexing_svc=_semantic_indexing_service,
     )
 
 
