@@ -31,6 +31,7 @@ from app.services.evidence_context_builder import EvidenceContextBuilder
 from app.services.evidence_retrieval_service import EvidenceRetrievalService
 from app.services.query_entity_resolver import QueryEntityResolver
 from app.services.query_intent_service import QueryIntentService
+from app.services.hybrid_evidence_retrieval_service import HybridEvidenceRetrievalService
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,14 @@ class NaturalLanguageQueryService:
         retrieval_svc: EvidenceRetrievalService,
         context_builder: EvidenceContextBuilder,
         provider: AbstractNaturalLanguageAnswerProvider,
+        hybrid_retrieval_svc: Optional[HybridEvidenceRetrievalService] = None,
     ) -> None:
         self._intent_svc = intent_svc
         self._entity_resolver = entity_resolver
         self._retrieval_svc = retrieval_svc
         self._context_builder = context_builder
         self._provider = provider
+        self._hybrid_retrieval = hybrid_retrieval_svc
 
     def _get_time(self, provided: Optional[datetime]) -> datetime:
         return provided if provided else datetime.now(timezone.utc)
@@ -139,13 +142,23 @@ class NaturalLanguageQueryService:
             resolved_entity_id = res.entity_id
 
         # 3. Evidence Retrieval
-        raw_items = self._retrieval_svc.retrieve_evidence(
-            intent=intent,
-            entity_id=resolved_entity_id,
-            current_time=current_time,
-            max_items=request.max_evidence_items,
-            include_source_text=request.include_source_text,
-        )
+        if self._hybrid_retrieval is not None:
+            raw_items = self._hybrid_retrieval.retrieve_evidence(
+                intent=intent,
+                entity_id=resolved_entity_id,
+                entity_resolution=res if intent in entity_intents else None,
+                query_text=request.question,
+                current_time=current_time,
+                max_items=request.max_evidence_items,
+            )
+        else:
+            raw_items = self._retrieval_svc.retrieve_evidence(
+                intent=intent,
+                entity_id=resolved_entity_id,
+                current_time=current_time,
+                max_items=request.max_evidence_items,
+                include_source_text=request.include_source_text,
+            )
 
         # 4. Context Building
         context = self._context_builder.build_context(
@@ -228,13 +241,23 @@ class NaturalLanguageQueryService:
                 return []
             resolved_entity_id = res.entity_id
 
-        raw_items = self._retrieval_svc.retrieve_evidence(
-            intent=intent,
-            entity_id=resolved_entity_id,
-            current_time=current_time,
-            max_items=request.max_evidence_items,
-            include_source_text=request.include_source_text,
-        )
+        if self._hybrid_retrieval is not None:
+            raw_items = self._hybrid_retrieval.retrieve_evidence(
+                intent=intent,
+                entity_id=resolved_entity_id,
+                entity_resolution=res if intent in entity_intents else None,
+                query_text=request.question,
+                current_time=current_time,
+                max_items=request.max_evidence_items,
+            )
+        else:
+            raw_items = self._retrieval_svc.retrieve_evidence(
+                intent=intent,
+                entity_id=resolved_entity_id,
+                current_time=current_time,
+                max_items=request.max_evidence_items,
+                include_source_text=request.include_source_text,
+            )
         
         context = self._context_builder.build_context(
             raw_items=raw_items,

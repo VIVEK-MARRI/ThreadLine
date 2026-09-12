@@ -235,6 +235,16 @@ class SemanticIndexingService:
         logger.debug(f"Removed {count} index records for {evidence_id}")
         return count
 
+    def retry_indexing(self, evidence_item: EvidenceItem) -> SemanticIndexRecord:
+        """Retry indexing from an authoritative source evidence item.
+
+        This operation is intentionally source-item based: the semantic index
+        stores no text and cannot be used to reconstruct missing evidence.
+        Existing valid records remain untouched until embedding generation and
+        the atomic repository upsert both succeed.
+        """
+        return self.index_evidence(evidence_item)
+
     def rebuild_index(
         self,
         evidence_items: list[EvidenceItem],
@@ -280,6 +290,7 @@ class SemanticIndexingService:
 
     def check_consistency(
         self,
+        source_evidence: Optional[list[EvidenceItem]] = None,
     ) -> dict:
         """Diagnostic check of index consistency.
 
@@ -296,6 +307,10 @@ class SemanticIndexingService:
         records = self._repository.list_all()
         issues = []
 
+        source_by_id = {
+            item.evidence_id: item for item in (source_evidence or [])
+        }
+
         records_by_model: dict[str, int] = {}
         for record in records:
             records_by_model[record.embedding_model] = (
@@ -304,6 +319,28 @@ class SemanticIndexingService:
 
         # Check for invalid vectors
         for record in records:
+            if source_evidence is not None and record.evidence_id not in source_by_id:
+                issues.append(f"Missing source evidence for {record.evidence_id}")
+
+            if source_evidence is not None and record.evidence_id in source_by_id:
+                representation = SemanticEvidenceRetrievalService._make_evidence_representation(
+                    source_by_id[record.evidence_id]
+                )
+                expected_hash = self._compute_representation_hash(representation)
+                if record.representation_hash != expected_hash:
+                    issues.append(f"Stale representation hash for {record.evidence_id}")
+
+            if record.embedding_model != self._embedding_model_name:
+                issues.append(
+                    f"Unexpected embedding model for {record.evidence_id}: "
+                    f"{record.embedding_model}"
+                )
+            if record.representation_version != self._representation_version:
+                issues.append(
+                    f"Unexpected representation version for {record.evidence_id}: "
+                    f"{record.representation_version}"
+                )
+
             if not record.embedding:
                 issues.append(
                     f"Empty embedding for {record.evidence_id} "

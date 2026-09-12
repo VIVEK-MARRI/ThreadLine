@@ -11,7 +11,7 @@ Categories:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.models.natural_language import EvidenceItem, EvidenceType, _make_evidence_id
 from app.providers.fake_embedding_provider import FakeEmbeddingProvider
@@ -156,7 +156,7 @@ class TestSemanticEvidenceRetrievalService:
             entity_id=entity_id,
             summary=summary,
             source_text=source_text or None,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
     def test_search_returns_list(self):

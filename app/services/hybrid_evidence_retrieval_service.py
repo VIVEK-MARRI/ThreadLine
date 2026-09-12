@@ -94,6 +94,7 @@ class HybridEvidenceRetrievalService:
         query_text: str,
         current_time: datetime,
         max_items: int = 20,
+        include_source_text: bool = True,
     ) -> list[EvidenceItem]:
         """Retrieve hybrid evidence: structured + semantic.
 
@@ -128,6 +129,7 @@ class HybridEvidenceRetrievalService:
             entity_id=entity_id,
             current_time=current_time,
             max_items=max_items * 2,  # Room for semantic to supplement
+            include_source_text=include_source_text,
         )
 
         # 2. Determine if we should perform semantic search

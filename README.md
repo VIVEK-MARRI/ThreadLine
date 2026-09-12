@@ -103,6 +103,62 @@ Fuzzy matching, embeddings, and LLM-based resolution are explicitly out of scope
 
 ---
 
+## Semantic Evidence Index (Stages 19-21)
+
+Semantic retrieval supplements, but never replaces, structured evidence. The
+authoritative `EvidenceItem` supplies source text, provenance, timestamps, and
+metadata; the semantic index stores only derived vectors and index metadata.
+
+The active query path is:
+
+```
+Structured EvidenceItem
+  -> SemanticIndexingService
+  -> Semantic index repository
+  -> HybridEvidenceRetrievalService
+  -> NaturalLanguageQueryService
+```
+
+Index records are identified by `(evidence_id, embedding_model,
+representation_version)`. A SHA-256 representation hash makes indexing
+incremental: unchanged evidence reuses its vector, while changed evidence is
+re-embedded. Missing or stale records are excluded from persisted semantic
+search rather than silently treated as current. Structured retrieval remains
+available when semantic indexing is unavailable.
+
+ThreadLine currently has no general database or ORM architecture. Stage 21
+therefore provides `JsonFileSemanticIndexRepository`, an atomic file-backed
+adapter for the derived index, plus `InMemorySemanticIndexRepository` for
+tests and development. Select the backend with:
+
+```text
+SEMANTIC_INDEX_BACKEND=in_memory|persistent
+SEMANTIC_INDEX_PATH=.threadline/semantic_index.json
+EMBEDDING_PROVIDER=fake|openai
+ACTIVE_EMBEDDING_MODEL=fake
+ACTIVE_REPRESENTATION_VERSION=1.0
+```
+
+The durable adapter serializes complete vectors and metadata, enforces the
+composite identity through upsert semantics, and atomically replaces the JSON
+file so queries cannot observe partial vectors. It does not persist source
+evidence and deleting index records never deletes organisational data.
+
+Indexing is triggered when the evidence retrieval boundary produces current
+`EvidenceItem` objects. Provider failures are isolated from source retrieval;
+the previous valid record remains until a new vector is successfully written.
+`retry_indexing(evidence_item)` retries from authoritative source data, and
+`check_consistency(source_evidence)` reports empty, malformed, stale, orphaned,
+wrong-model, and wrong-version records without modifying them.
+
+Model and representation migrations create records under a new active model or
+version. Queries select exactly one configured pair and never mix vector
+spaces. Application startup initializes the repository only; it does not
+re-embed the corpus. Full repair/rebuild remains an internal service workflow,
+not a normal-user API endpoint.
+
+---
+
 ## Candidate Generation
 
 Candidate generation is the **next stage** after exact-match resolution.

@@ -10,7 +10,7 @@ Categories:
 """
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import Mock, MagicMock
 
 from app.models.natural_language import (
@@ -75,7 +75,7 @@ class TestHybridEvidenceRetrieval:
             severity_weight=severity,
             type_priority=priority,
             source_text=source_text or None,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
     # -----------------------------------------------------------------------
@@ -91,7 +91,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -108,7 +108,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -122,7 +122,7 @@ class TestHybridEvidenceRetrieval:
             entity_id=None,
             entity_resolution=None,
             query_text="what will happen?",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -140,7 +140,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=5,
         )
 
@@ -165,7 +165,7 @@ class TestHybridEvidenceRetrieval:
             entity_id=None,
             entity_resolution=resolution,
             query_text="Phoenix status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -189,7 +189,7 @@ class TestHybridEvidenceRetrieval:
             entity_id=None,
             entity_resolution=resolution,
             query_text="What is holding up the gateway rollout?",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -214,7 +214,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=resolution,
             query_text="Payment rollout status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -241,7 +241,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -372,7 +372,7 @@ class TestHybridEvidenceRetrieval:
 
     def test_rank_by_timestamp_desc(self):
         """Ranking uses timestamp (DESC) as tertiary criterion."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         recent = self.make_evidence("e1", "Recent")
         recent.timestamp = now
 
@@ -409,7 +409,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 
@@ -426,7 +426,7 @@ class TestHybridEvidenceRetrieval:
             entity_id="e1",
             entity_resolution=None,
             query_text="status",
-            current_time=datetime.utcnow(),
+            current_time=datetime.now(timezone.utc),
             max_items=20,
         )
 

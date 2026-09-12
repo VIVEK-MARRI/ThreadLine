@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # Which natural language provider to use. Recognised values: "openai", "fake".
     nl_provider: str = "fake"
 
+    # Semantic index settings. The durable JSON backend is opt-in while the
+    # rest of ThreadLine remains in-memory; tests keep the offline fallback.
+    semantic_index_backend: str = "in_memory"
+    semantic_index_path: str = ".threadline/semantic_index.json"
+    embedding_provider: str = "fake"
+    active_embedding_model: str = "fake"
+    active_representation_version: str = "1.0"
+
     model_config = ConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

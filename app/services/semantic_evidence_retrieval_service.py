@@ -29,6 +29,7 @@ from typing import Optional
 
 from app.models.natural_language import EvidenceItem
 from app.providers.embedding_base import AbstractEmbeddingProvider
+from app.repositories.semantic_index_repository import AbstractSemanticIndexRepository
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,9 @@ class SemanticEvidenceRetrievalService:
         self,
         embedding_provider: AbstractEmbeddingProvider,
         min_similarity: float = 0.6,
+        repository: Optional[AbstractSemanticIndexRepository] = None,
+        embedding_model_name: str = "fake",
+        representation_version: str = "1.0",
     ) -> None:
         """
         Parameters
@@ -123,6 +127,9 @@ class SemanticEvidenceRetrievalService:
             raise ValueError("min_similarity must be in [0, 1]")
         self._embedding_provider = embedding_provider
         self._min_similarity = min_similarity
+        self._repository = repository
+        self._embedding_model_name = embedding_model_name
+        self._representation_version = representation_version
 
     def search(
         self,
@@ -167,18 +174,38 @@ class SemanticEvidenceRetrievalService:
         # 1. Embed the query
         query_embedding = self._embedding_provider.embed_text(query.strip())
 
-        # 2. Embed all evidence items (in a single batch if possible)
-        #    For now, we embed each separately. Real optimization could batch.
+        # 2. Use current persisted vectors when configured. Source evidence is
+        # still carried by the caller and remains authoritative.
         evidence_embeddings = []
         for item in evidence_items:
-            # Create a deterministic representation of the evidence
-            representation = self._make_evidence_representation(item)
-            embedding = self._embedding_provider.embed_text(representation)
-            evidence_embeddings.append(embedding)
+            embedding = None
+            if self._repository is not None:
+                record = self._repository.get_by_composite_key(
+                    item.evidence_id,
+                    self._embedding_model_name,
+                    self._representation_version,
+                )
+                if record is not None:
+                    representation = self._make_evidence_representation(item)
+                    from app.services.semantic_indexing_service import SemanticIndexingService
+
+                    expected_hash = SemanticIndexingService._compute_representation_hash(
+                        representation
+                    )
+                    if record.representation_hash == expected_hash:
+                        embedding = record.embedding
+            if embedding is None:
+                if self._repository is not None:
+                    # Missing or stale records are excluded rather than
+                    # silently re-embedded during a read-only query.
+                    continue
+                representation = self._make_evidence_representation(item)
+                embedding = self._embedding_provider.embed_text(representation)
+            evidence_embeddings.append((item, embedding))
 
         # 3. Compute similarities
         candidates = []
-        for item, item_embedding in zip(evidence_items, evidence_embeddings):
+        for item, item_embedding in evidence_embeddings:
             similarity = cosine_similarity(query_embedding, item_embedding)
 
             # Only include if meets threshold

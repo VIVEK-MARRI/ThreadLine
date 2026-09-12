@@ -7,6 +7,10 @@ Pattern matches existing repository conventions in ThreadLine.
 """
 
 from abc import ABC, abstractmethod
+import json
+import os
+from pathlib import Path
+from threading import RLock
 from typing import Optional
 
 from app.models.semantic_index import SemanticIndexRecord
@@ -301,3 +305,131 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
     def count(self) -> int:
         """Count total records."""
         return len(self._records)
+
+
+# ---------------------------------------------------------------------------
+# JSON File Implementation
+# ---------------------------------------------------------------------------
+
+class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
+    """Durable semantic index backed by an atomically replaced JSON file.
+
+    ThreadLine has no database or ORM layer yet. This adapter gives the
+    derived semantic index durability without introducing a second, partial
+    source-of-truth database architecture. Writes are serialized in-process
+    and committed through ``os.replace`` so readers never observe a partial
+    JSON document.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+        self._lock = RLock()
+        self._records: dict[tuple[str, str, str], SemanticIndexRecord] = {}
+        self._load()
+
+    @staticmethod
+    def _key(record: SemanticIndexRecord) -> tuple[str, str, str]:
+        return (
+            record.evidence_id,
+            record.embedding_model,
+            record.representation_version,
+        )
+
+    def _load(self) -> None:
+        if not self._path.exists():
+            return
+        with self._path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, list):
+            raise ValueError("semantic index file must contain a JSON list")
+        for item in payload:
+            record = SemanticIndexRecord.model_validate(item)
+            self._records[self._key(record)] = record
+
+    def _persist(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        payload = [
+            record.model_dump(mode="json")
+            for record in sorted(
+                self._records.values(),
+                key=lambda item: (
+                    item.embedding_model,
+                    item.evidence_id,
+                    item.representation_version,
+                ),
+            )
+        ]
+        with temporary_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, self._path)
+
+    def get_by_composite_key(
+        self,
+        evidence_id: str,
+        embedding_model: str,
+        representation_version: str,
+    ) -> Optional[SemanticIndexRecord]:
+        with self._lock:
+            return self._records.get((evidence_id, embedding_model, representation_version))
+
+    def get_by_evidence_id(self, evidence_id: str) -> list[SemanticIndexRecord]:
+        with self._lock:
+            records = [record for record in self._records.values() if record.evidence_id == evidence_id]
+            return sorted(records, key=lambda item: (item.embedding_model, item.representation_version))
+
+    def upsert(self, record: SemanticIndexRecord) -> SemanticIndexRecord:
+        with self._lock:
+            self._records[self._key(record)] = record
+            self._persist()
+            return record
+
+    def delete(
+        self,
+        evidence_id: str,
+        embedding_model: str,
+        representation_version: str,
+    ) -> bool:
+        with self._lock:
+            key = (evidence_id, embedding_model, representation_version)
+            if key not in self._records:
+                return False
+            del self._records[key]
+            self._persist()
+            return True
+
+    def delete_by_evidence_id(self, evidence_id: str) -> int:
+        with self._lock:
+            keys = [key for key in self._records if key[0] == evidence_id]
+            for key in keys:
+                del self._records[key]
+            if keys:
+                self._persist()
+            return len(keys)
+
+    def exists(
+        self,
+        evidence_id: str,
+        embedding_model: str,
+        representation_version: str,
+    ) -> bool:
+        with self._lock:
+            return (evidence_id, embedding_model, representation_version) in self._records
+
+    def list_by_model(self, embedding_model: str) -> list[SemanticIndexRecord]:
+        with self._lock:
+            records = [record for record in self._records.values() if record.embedding_model == embedding_model]
+            return sorted(records, key=lambda item: (item.evidence_id, item.representation_version))
+
+    def list_all(self) -> list[SemanticIndexRecord]:
+        with self._lock:
+            return sorted(
+                self._records.values(),
+                key=lambda item: (item.embedding_model, item.evidence_id, item.representation_version),
+            )
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._records)

@@ -41,6 +41,16 @@ from app.services.evidence_retrieval_service import EvidenceRetrievalService
 from app.services.natural_language_query_service import NaturalLanguageQueryService
 from app.services.query_entity_resolver import QueryEntityResolver
 from app.services.query_intent_service import QueryIntentService
+from app.providers.fake_embedding_provider import FakeEmbeddingProvider
+from app.providers.openai_embedding_provider import OpenAIEmbeddingProvider
+from app.repositories.semantic_index_repository import (
+    AbstractSemanticIndexRepository,
+    InMemorySemanticIndexRepository,
+    JsonFileSemanticIndexRepository,
+)
+from app.services.hybrid_evidence_retrieval_service import HybridEvidenceRetrievalService
+from app.services.semantic_evidence_retrieval_service import SemanticEvidenceRetrievalService
+from app.services.semantic_indexing_service import SemanticIndexingService
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +85,39 @@ _context_builder = EvidenceContextBuilder()
 _entity_resolver = QueryEntityResolver(entity_repo=_entity_repository)
 
 
+def _build_semantic_repository() -> AbstractSemanticIndexRepository:
+    backend = settings.semantic_index_backend.lower()
+    if backend == "in_memory":
+        return InMemorySemanticIndexRepository()
+    if backend == "persistent":
+        return JsonFileSemanticIndexRepository(settings.semantic_index_path)
+    raise ValueError(
+        f"Unknown SEMANTIC_INDEX_BACKEND value: '{settings.semantic_index_backend}'. "
+        "Supported values: 'in_memory', 'persistent'."
+    )
+
+
+def _build_embedding_provider():
+    if settings.embedding_provider.lower() == "fake":
+        return FakeEmbeddingProvider()
+    if settings.embedding_provider.lower() == "openai":
+        return OpenAIEmbeddingProvider(
+            api_key=settings.openai_api_key,
+            model=settings.active_embedding_model,
+        )
+    raise ValueError(f"Unknown EMBEDDING_PROVIDER value: '{settings.embedding_provider}'.")
+
+
+_semantic_repository = _build_semantic_repository()
+_embedding_provider = _build_embedding_provider()
+_semantic_indexing_service = SemanticIndexingService(
+    embedding_provider=_embedding_provider,
+    repository=_semantic_repository,
+    embedding_model_name=settings.active_embedding_model,
+    representation_version=settings.active_representation_version,
+)
+
+
 # ---------------------------------------------------------------------------
 # Dependency injection
 # ---------------------------------------------------------------------------
@@ -105,6 +148,7 @@ def get_evidence_retrieval_service(
         org_change_svc=org_change_svc,
         portfolio_svc=portfolio_svc,
         relationship_svc=relationship_svc,
+        semantic_indexing_svc=_semantic_indexing_service,
     )
 
 
@@ -112,12 +156,23 @@ def get_natural_language_query_service(
     retrieval_svc: EvidenceRetrievalService = Depends(get_evidence_retrieval_service),
 ) -> NaturalLanguageQueryService:
     """FastAPI dependency that provides a configured NaturalLanguageQueryService."""
+    semantic_service = SemanticEvidenceRetrievalService(
+        embedding_provider=_embedding_provider,
+        repository=_semantic_repository,
+        embedding_model_name=settings.active_embedding_model,
+        representation_version=settings.active_representation_version,
+    )
+    hybrid_service = HybridEvidenceRetrievalService(
+        structured_service=retrieval_svc,
+        semantic_service=semantic_service,
+    )
     return NaturalLanguageQueryService(
         intent_svc=_intent_service,
         entity_resolver=_entity_resolver,
         retrieval_svc=retrieval_svc,
         context_builder=_context_builder,
         provider=_nl_provider,
+        hybrid_retrieval_svc=hybrid_service,
     )
 
 
