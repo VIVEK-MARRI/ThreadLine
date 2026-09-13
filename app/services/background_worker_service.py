@@ -24,18 +24,38 @@ class BackgroundJobScheduler:
         self._repository = repository
         self._max_attempts = max_attempts
 
-    def enqueue(self, job_type: BackgroundJobType, payload_id: str, now: Optional[datetime] = None) -> BackgroundJob:
-        timestamp = now or datetime.now(timezone.utc)
-        job = BackgroundJob(
-            job_id=f"{job_type.value}:{payload_id}",
-            job_type=job_type,
-            payload_id=payload_id,
-            max_attempts=self._max_attempts,
-            created_at=timestamp,
-        )
+    def enqueue(
+        self,
+        job_type: BackgroundJobType,
+        payload_id: str,
+        now: Optional[datetime] = None,
+        processing_revision: Optional[str] = None,
+    ) -> BackgroundJob:
+        job = self.build_job(job_type, payload_id, now, processing_revision)
         result = self._repository.enqueue(job)
         logger.info("job_created job_id=%s job_type=%s payload_id=%s", result.job_id, result.job_type.value, result.payload_id)
         return result
+
+    def build_job(
+        self,
+        job_type: BackgroundJobType,
+        payload_id: str,
+        now: Optional[datetime] = None,
+        processing_revision: Optional[str] = None,
+    ) -> BackgroundJob:
+        timestamp = now or datetime.now(timezone.utc)
+        return BackgroundJob(
+            job_id=(
+                f"{job_type.value}:{payload_id}"
+                if processing_revision is None
+                else f"{job_type.value}:{payload_id}:{processing_revision}"
+            ),
+            job_type=job_type,
+            payload_id=payload_id,
+            processing_revision=processing_revision,
+            max_attempts=self._max_attempts,
+            created_at=timestamp,
+        )
 
     def cancel(self, job_id: str, now: Optional[datetime] = None) -> BackgroundJob:
         return self._repository.cancel(job_id, now or datetime.now(timezone.utc))
@@ -101,11 +121,28 @@ class BackgroundWorkerService:
         except PermanentJobError as exc:
             return self._fail(claimed, current, exc, "PERMANENT")
         except Exception as exc:
+            logger.exception(
+                "job_processing_error job_id=%s meeting_id=%s revision=%s "
+                "stage=%s worker_id=%s attempt=%s",
+                claimed.job_id,
+                claimed.payload_id,
+                claimed.processing_revision,
+                claimed.stage,
+                self._worker_id,
+                claimed.attempts,
+            )
             return self._retry_or_fail(claimed, current, exc)
+        self._repository.checkpoint(
+            claimed.job_id,
+            "COMPLETED",
+            self._worker_id,
+            current,
+        )
         result = self._repository.transition(
             claimed.job_id,
             BackgroundJobStatus.SUCCEEDED,
             current,
+            owner_id=self._worker_id,
             last_error=None,
             error_type=None,
         )
@@ -120,6 +157,7 @@ class BackgroundWorkerService:
             job.job_id,
             BackgroundJobStatus.RETRY_WAITING,
             now,
+            owner_id=self._worker_id,
             next_retry_at=now + timedelta(seconds=delay),
             last_error=str(exc),
             error_type="TRANSIENT",
@@ -133,6 +171,7 @@ class BackgroundWorkerService:
             job.job_id,
             BackgroundJobStatus.FAILED,
             now,
+            owner_id=self._worker_id,
             last_error=str(exc),
             error_type=error_type,
         )
@@ -141,4 +180,7 @@ class BackgroundWorkerService:
 
     def checkpoint(self, job_id: str, stage: str) -> BackgroundJob:
         logger.info("stage_completed job_id=%s stage=%s", job_id, stage)
-        return self._repository.checkpoint(job_id, stage)
+        current = self._repository.get(job_id)
+        if current is not None and current.status == BackgroundJobStatus.SUCCEEDED and current.stage == stage:
+            return current
+        return self._repository.checkpoint(job_id, stage, self._worker_id, datetime.now(timezone.utc))

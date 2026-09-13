@@ -47,3 +47,30 @@ def test_reingestion_with_same_meeting_id_is_idempotent(tmp_path):
     second = service.ingest_meeting(request)
     assert first.meeting_id == second.meeting_id == "meeting-1"
     assert repository.get_by_id("meeting-1").meeting_id == "meeting-1"
+
+
+def test_source_revision_is_persisted_and_extraction_binds_to_it(tmp_path):
+    store = SQLiteSourceStore(tmp_path / "source.db")
+    repository = SQLiteMeetingRepository(store)
+    service = MeetingService(repository)
+    first = service.ingest_meeting(MeetingIngestRequest(
+        meeting_id="meeting-revision",
+        title="Payments",
+        transcript="Gateway approval",
+        meeting_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    ))
+    revised = service.revise_meeting(
+        first.meeting_id,
+        MeetingIngestRequest(
+            meeting_id=first.meeting_id,
+            title="Payments",
+            transcript="Gateway approval is now blocked",
+            meeting_date=first.meeting_date,
+        ),
+    )
+    repository.save(revised)
+
+    reopened = SQLiteMeetingRepository(SQLiteSourceStore(tmp_path / "source.db"))
+    restored = reopened.get_by_id(first.meeting_id)
+    assert restored.source_revision == 2
+    assert restored.transcript.endswith("blocked")

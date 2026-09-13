@@ -80,11 +80,20 @@ class ResolutionService:
         entity_repo: AbstractEntityRepository,
         scoring_service: CandidateScoringService,
         policy: AbstractResolutionPolicy,
+        ownership_checker=None,
     ) -> None:
         self._mention_repo = mention_repo
         self._entity_repo = entity_repo
         self._scoring_service = scoring_service
         self._policy = policy
+        self._ownership_checker = ownership_checker
+
+    def set_ownership_checker(self, checker) -> None:
+        self._ownership_checker = checker
+
+    def _assert_owned(self) -> None:
+        if self._ownership_checker is not None:
+            self._ownership_checker()
 
     def resolve(self, mention_id: str) -> ResolutionDecision:
         """Apply the resolution policy to a mention and return the decision.
@@ -167,6 +176,7 @@ class ResolutionService:
                     "resolution_status": ResolutionStatus.RESOLVED,
                 }
             )
+            self._assert_owned()
             self._mention_repo.update(updated_mention)
             logger.info(
                 "ResolutionService: mention %s resolved to entity %s.",
@@ -182,6 +192,7 @@ class ResolutionService:
                     "resolution_status": ResolutionStatus.AMBIGUOUS,
                 }
             )
+            self._assert_owned()
             self._mention_repo.update(updated_mention)
             logger.info(
                 "ResolutionService: mention %s marked AMBIGUOUS.",

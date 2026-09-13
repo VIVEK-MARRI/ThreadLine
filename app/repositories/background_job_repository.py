@@ -21,6 +21,17 @@ _ALLOWED_TRANSITIONS = {
     BackgroundJobStatus.CANCELLED: set(),
 }
 
+_STAGE_ORDER = {
+    None: -1,
+    "INGESTED": 0,
+    "EXTRACTED": 1,
+    "RESOLVED": 2,
+    "RELATIONSHIPS_PERSISTED": 3,
+    "DERIVED_INTELLIGENCE": 4,
+    "SEMANTIC_INDEXED": 5,
+    "COMPLETED": 6,
+}
+
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
@@ -32,6 +43,10 @@ def _parse(value: Optional[str]) -> Optional[datetime]:
 
 class InvalidJobTransition(ValueError):
     """Raised when a job state transition is not allowed."""
+
+
+class StaleJobOwnershipError(InvalidJobTransition):
+    """Raised when a worker mutates a job after losing its lease."""
 
 
 class AbstractBackgroundJobRepository(ABC):
@@ -54,7 +69,7 @@ class AbstractBackgroundJobRepository(ABC):
         ...
 
     @abstractmethod
-    def checkpoint(self, job_id: str, stage: str) -> BackgroundJob:
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
         ...
 
     @abstractmethod
@@ -116,6 +131,15 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
             job = self._jobs[job_id]
             if status not in _ALLOWED_TRANSITIONS[job.status]:
                 raise InvalidJobTransition(f"{job.status.value} -> {status.value} is not allowed")
+            owner = fields.get("owner_id")
+            if owner is not None and (
+                job.status != BackgroundJobStatus.RUNNING
+                or job.worker_id != owner
+                or job.lease_until is None
+                or job.lease_until <= now
+            ):
+                raise StaleJobOwnershipError(f"worker {owner} no longer owns job {job_id}")
+            fields = {key: value for key, value in fields.items() if key != "owner_id"}
             job.status = status
             for key, value in fields.items():
                 setattr(job, key, value)
@@ -124,9 +148,19 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
                 job.lease_until = None
             return job
 
-    def checkpoint(self, job_id: str, stage: str) -> BackgroundJob:
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
         with self._lock:
             job = self._jobs[job_id]
+            if _STAGE_ORDER.get(stage, -1) < _STAGE_ORDER.get(job.stage, -1):
+                raise InvalidJobTransition(f"checkpoint regression: {job.stage} -> {stage}")
+            timestamp = now or datetime.now(timezone.utc)
+            if worker_id is not None and (
+                job.status != BackgroundJobStatus.RUNNING
+                or job.worker_id != worker_id
+                or job.lease_until is None
+                or job.lease_until <= timestamp
+            ):
+                raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
             job.stage = stage
             return job
 
@@ -170,6 +204,7 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             completed_at=_parse(row["completed_at"]), last_error=row["last_error"],
             error_type=row["error_type"], next_retry_at=_parse(row["next_retry_at"]),
             lease_until=_parse(row["lease_until"]), worker_id=row["worker_id"], stage=row["stage"],
+            processing_revision=row["processing_revision"],
         )
 
     def enqueue(self, job: BackgroundJob) -> BackgroundJob:
@@ -177,12 +212,12 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             connection.execute(
                 """INSERT INTO background_jobs
                 (job_id, job_type, payload_id, status, attempts, max_attempts, created_at,
-                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO NOTHING""",
                 (job.job_id, job.job_type.value, job.payload_id, job.status.value, job.attempts,
                  job.max_attempts, _iso(job.created_at), _iso(job.started_at), _iso(job.completed_at),
-                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage),
+                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage, job.processing_revision),
             )
             row = connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job.job_id,)).fetchone()
             return self._from_row(row)
@@ -216,6 +251,14 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             raise KeyError(job_id)
         if status not in _ALLOWED_TRANSITIONS[current.status]:
             raise InvalidJobTransition(f"{current.status.value} -> {status.value} is not allowed")
+        owner = fields.get("owner_id")
+        if owner is not None and (
+            current.status != BackgroundJobStatus.RUNNING
+            or current.worker_id != owner
+            or current.lease_until is None
+            or current.lease_until <= now
+        ):
+            raise StaleJobOwnershipError(f"worker {owner} no longer owns job {job_id}")
         values = {
             "status": status.value,
             "completed_at": _iso(now) if status in {BackgroundJobStatus.SUCCEEDED, BackgroundJobStatus.FAILED, BackgroundJobStatus.CANCELLED} else _iso(current.completed_at),
@@ -228,17 +271,31 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
         with self._store.transaction() as connection:
             updated = connection.execute(
                 """UPDATE background_jobs SET status=?, completed_at=?, last_error=?, error_type=?,
-                   next_retry_at=?, lease_until=?, worker_id=? WHERE job_id=? AND status=?""",
+                   next_retry_at=?, lease_until=?, worker_id=? WHERE job_id=? AND status=?
+                   AND (? IS NULL OR (worker_id=? AND lease_until IS NOT NULL AND lease_until>?))""",
                 (values["status"], values["completed_at"], values["last_error"], values["error_type"],
-                 values["next_retry_at"], values["lease_until"], values["worker_id"], job_id, current.status.value),
+                 values["next_retry_at"], values["lease_until"], values["worker_id"], job_id, current.status.value,
+                 owner, owner, _iso(now)),
             )
             if updated.rowcount != 1:
-                raise InvalidJobTransition("job state changed before transition")
+                raise StaleJobOwnershipError(f"worker {owner} no longer owns job {job_id}") if owner else InvalidJobTransition("job state changed before transition")
         return self.get(job_id)
 
-    def checkpoint(self, job_id: str, stage: str) -> BackgroundJob:
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
+        timestamp = now or datetime.now(timezone.utc)
         with self._store.transaction() as connection:
-            connection.execute("UPDATE background_jobs SET stage=? WHERE job_id=?", (stage, job_id))
+            row = connection.execute("SELECT stage FROM background_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if _STAGE_ORDER.get(stage, -1) < _STAGE_ORDER.get(row["stage"], -1):
+                raise InvalidJobTransition(f"checkpoint regression: {row['stage']} -> {stage}")
+            updated = connection.execute(
+                """UPDATE background_jobs SET stage=? WHERE job_id=?
+                   AND (? IS NULL OR (status=? AND worker_id=? AND lease_until IS NOT NULL AND lease_until>?))""",
+                (stage, job_id, worker_id, BackgroundJobStatus.RUNNING.value, worker_id, _iso(timestamp)),
+            )
+            if updated.rowcount != 1:
+                raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
         return self.get(job_id)
 
     def recover_stale(self, now: datetime) -> list[BackgroundJob]:

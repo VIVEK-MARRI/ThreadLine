@@ -17,7 +17,7 @@ EXTRACTION_PROVIDER  Which provider to activate: "openai" (default) or
 
 from typing import Optional
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -57,6 +57,47 @@ class Settings(BaseSettings):
     background_poll_interval_seconds: float = 1.0
     background_max_attempts: int = 3
     background_lease_seconds: int = 60
+
+    @field_validator(
+        "source_repository_backend",
+        "semantic_index_backend",
+        "embedding_provider",
+        "extraction_provider",
+        "nl_provider",
+    )
+    @classmethod
+    def known_backend_values(cls, value: str, info) -> str:
+        allowed = {
+            "source_repository_backend": {"in_memory", "database"},
+            "semantic_index_backend": {"in_memory", "persistent"},
+            "embedding_provider": {"fake", "openai"},
+            "extraction_provider": {"fake", "openai"},
+            "nl_provider": {"fake", "openai"},
+        }[info.field_name]
+        normalized = value.lower()
+        if normalized not in allowed:
+            raise ValueError(
+                f"{info.field_name} must be one of {sorted(allowed)}, got '{value}'"
+            )
+        return normalized
+
+    @field_validator("source_database_path", "semantic_index_path")
+    @classmethod
+    def non_empty_path(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("storage paths must not be empty")
+        return value
+
+    @field_validator(
+        "background_poll_interval_seconds",
+        "background_max_attempts",
+        "background_lease_seconds",
+    )
+    @classmethod
+    def positive_worker_setting(cls, value):
+        if value <= 0:
+            raise ValueError("worker timing and retry settings must be positive")
+        return value
 
     model_config = ConfigDict(
         env_file=".env",

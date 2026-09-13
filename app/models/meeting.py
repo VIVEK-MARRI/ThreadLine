@@ -37,6 +37,11 @@ class Meeting(BaseModel):
         default=None,
         description="Stable client-supplied identity for idempotent ingestion.",
     )
+    source_revision: int = Field(
+        default=1,
+        ge=1,
+        description="Monotonic authoritative revision of the meeting source.",
+    )
 
     # ------------------------------------------------------------------
     # Extensibility note

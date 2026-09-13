@@ -100,7 +100,7 @@ def _build_extraction_provider():
         from app.models.extraction import ExtractionResult
 
         empty_result = ExtractionResult(
-            meeting_id="__placeholder__",
+            meeting_id="",
             extracted_at=datetime.now(tz=timezone.utc),
         )
         return FakeExtractionProvider(result=empty_result)
@@ -120,7 +120,23 @@ _extraction_provider = _build_extraction_provider()
 
 def get_meeting_service() -> MeetingService:
     """FastAPI dependency that provides a configured MeetingService."""
-    return MeetingService(repository=_meeting_repository)
+    def persist_ingestion(meeting: Meeting) -> None:
+        from app.api.jobs import get_job_scheduler
+        from app.services.processing_consistency_service import processing_revision_for
+
+        scheduler = get_job_scheduler()
+        job = scheduler.build_job(
+            BackgroundJobType.MEETING_PROCESSING,
+            meeting.meeting_id,
+            processing_revision=processing_revision_for(meeting.source_revision),
+        )
+        if isinstance(_meeting_repository, SQLiteMeetingRepository):
+            _meeting_repository.save_and_enqueue(meeting, job)
+        else:
+            _meeting_repository.save(meeting)
+            scheduler._repository.enqueue(job)
+
+    return MeetingService(repository=_meeting_repository, ingestion_persister=persist_ingestion)
 
 
 def get_extraction_service() -> ExtractionService:
@@ -205,15 +221,26 @@ def ingest_meeting(
     request: MeetingIngestRequest,
     service: MeetingService = Depends(get_meeting_service),
 ) -> MeetingIngestResponse:
-    """Ingest a meeting and return its assigned ID."""
+    """Ingest a meeting and return its assigned ID.
+
+    MUTATES SOURCE TRUTH: creates authoritative source revision 1 and its
+    durably tied processing revision "1".  Idempotent for identical payloads.
+    """
     try:
         meeting = service.ingest_meeting(request)
     except MeetingConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    # Source persistence completes before the durable processing job is queued.
+    # The service persists the meeting and processing intent together in database mode.
+    # This second enqueue is idempotent (same deterministic job_id) and covers
+    # in-memory backends where the persister path differs.
     from app.api.jobs import get_job_scheduler
+    from app.services.processing_consistency_service import processing_revision_for
 
-    get_job_scheduler().enqueue(BackgroundJobType.MEETING_PROCESSING, meeting.meeting_id)
+    get_job_scheduler().enqueue(
+        BackgroundJobType.MEETING_PROCESSING,
+        meeting.meeting_id,
+        processing_revision=processing_revision_for(meeting.source_revision),
+    )
     return MeetingIngestResponse(meeting_id=meeting.meeting_id, status="ingested")
 
 
@@ -237,22 +264,69 @@ def get_meeting(
     return _meeting_to_response(meeting)
 
 
+@router.put(
+    "/{meeting_id}",
+    response_model=MeetingIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create a new source revision for a meeting",
+)
+def revise_meeting(
+    meeting_id: str,
+    request: MeetingIngestRequest,
+    service: MeetingService = Depends(get_meeting_service),
+) -> MeetingIngestResponse:
+    """Persist a changed source and enqueue its distinct processing revision.
+
+    MUTATES SOURCE TRUTH: creates authoritative source revision N+1 and a new
+    processing execution tied to N+1.  Historical jobs are preserved; the old
+    completed job never blocks the new revision.
+    """
+    from app.api.jobs import get_job_scheduler
+    from app.services.processing_consistency_service import processing_revision_for
+
+    try:
+        meeting = service.revise_meeting(meeting_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    scheduler = get_job_scheduler()
+    job = scheduler.build_job(
+        BackgroundJobType.MEETING_PROCESSING,
+        meeting_id,
+        processing_revision=processing_revision_for(meeting.source_revision),
+    )
+    if isinstance(_meeting_repository, SQLiteMeetingRepository):
+        _meeting_repository.save_and_enqueue(meeting, job)
+    else:
+        _meeting_repository.save(meeting)
+        scheduler._repository.enqueue(job)
+    return MeetingIngestResponse(meeting_id=meeting_id, status="revisioned")
+
+
 @router.post(
     "/{meeting_id}/extract",
     response_model=ExtractionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Extract structured facts from a meeting transcript",
+    summary="Refresh extraction and enqueue a revision-tied reprocessing job",
     description=(
         "Runs the information extraction pipeline on a stored meeting transcript.  "
-        "Returns evidence-backed issues, tasks, decisions, and risks.  "
-        "Calling this endpoint multiple times will overwrite the previous result."
+        "Does NOT mutate authoritative meeting source truth (transcript, "
+        "participants, source_revision are unchanged); it refreshes derived "
+        "extraction state and enqueues a distinct revision-tied reprocessing "
+        "job so downstream stages re-run without being blocked by history.  "
+        "Calling this endpoint multiple times creates distinct processing "
+        "revisions over the same source revision."
     ),
 )
 def extract_meeting(
     meeting_id: str,
     service: ExtractionService = Depends(get_extraction_service),
 ) -> ExtractionResponse:
-    """Trigger extraction for a meeting and return structured facts."""
+    """Trigger extraction refresh and enqueue its distinct processing revision.
+
+    DOES NOT MUTATE SOURCE TRUTH: meeting transcript/participants/source_revision
+    are untouched.  Only derived extraction state is refreshed.
+    """
     try:
         result = service.extract_meeting(meeting_id)
     except MeetingNotFoundError as exc:
@@ -288,5 +362,18 @@ def extract_meeting(
             ),
         ) from exc
 
+    from app.api.jobs import get_job_scheduler
+    from app.services.processing_consistency_service import processing_revision_for
+
+    # Distinct refresh revision over the SAME source revision: history is
+    # preserved (old completed job never blocks) and the new execution is
+    # still explicitly tied to its source revision via the "N@suffix" form.
+    get_job_scheduler().enqueue(
+        BackgroundJobType.MEETING_PROCESSING,
+        meeting_id,
+        processing_revision=processing_revision_for(
+            result.source_revision, suffix=result.extracted_at.isoformat()
+        ),
+    )
     return _extraction_to_response(result)
 

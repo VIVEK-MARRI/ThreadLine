@@ -1,6 +1,7 @@
 """Checkpointed, source-first meeting processing workflow."""
 
 from enum import StrEnum
+from datetime import datetime, timezone
 from typing import Callable
 
 from app.models.background_job import BackgroundJob
@@ -43,10 +44,10 @@ class MeetingProcessingService:
                 current_index = -1
         for stage in self._stages[current_index + 1:]:
             if stage == ProcessingStage.COMPLETED:
-                self._repository.checkpoint(job.job_id, stage.value)
+                self._repository.checkpoint(job.job_id, stage.value, job.worker_id, datetime.now(timezone.utc))
                 continue
             handler = self._handlers.get(stage)
             if handler is None:
                 raise PermanentJobError(f"missing processing handler for stage {stage.value}")
             handler(job.payload_id)
-            self._repository.checkpoint(job.job_id, stage.value)
+            self._repository.checkpoint(job.job_id, stage.value, job.worker_id, datetime.now(timezone.utc))

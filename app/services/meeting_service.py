@@ -7,7 +7,7 @@ has no awareness of HTTP, Pydantic schemas, or storage mechanics.
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.models.meeting import Meeting
 from app.repositories.meeting_repository import AbstractMeetingRepository
@@ -21,8 +21,9 @@ class MeetingConflictError(ValueError):
 class MeetingService:
     """Encapsulates all meeting-related business operations."""
 
-    def __init__(self, repository: AbstractMeetingRepository) -> None:
+    def __init__(self, repository: AbstractMeetingRepository, ingestion_persister: Optional[Callable[[Meeting], None]] = None) -> None:
         self._repository = repository
+        self._ingestion_persister = ingestion_persister
 
     def ingest_meeting(self, request: MeetingIngestRequest) -> Meeting:
         """Create a new Meeting record from a client request and persist it.
@@ -56,9 +57,28 @@ class MeetingService:
             ingested_at=datetime.now(tz=timezone.utc),
             idempotency_key=request.meeting_id,
         )
-        self._repository.save(meeting)
+        if self._ingestion_persister is not None:
+            self._ingestion_persister(meeting)
+        else:
+            self._repository.save(meeting)
         return meeting
 
     def get_meeting(self, meeting_id: str) -> Optional[Meeting]:
         """Return a meeting by ID, or None if it does not exist."""
         return self._repository.get_by_id(meeting_id)
+
+    def revise_meeting(self, meeting_id: str, request: MeetingIngestRequest) -> Meeting:
+        """Create the next authoritative source revision for a meeting."""
+        existing = self._repository.get_by_id(meeting_id)
+        if existing is None:
+            raise KeyError(meeting_id)
+        return Meeting(
+            meeting_id=meeting_id,
+            title=request.title,
+            transcript=request.transcript,
+            meeting_date=request.meeting_date,
+            participants=request.participants or [],
+            ingested_at=datetime.now(tz=timezone.utc),
+            idempotency_key=existing.idempotency_key,
+            source_revision=existing.source_revision + 1,
+        )

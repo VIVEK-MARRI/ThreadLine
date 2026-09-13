@@ -59,4 +59,6 @@ class FakeExtractionProvider(AbstractExtractionProvider):
         """Return the canned result (or raise the configured exception)."""
         if self._raise is not None:
             raise self._raise
-        return self._result
+        # The requested ID is authoritative; a canned fixture must not create
+        # an extraction row that violates the meeting foreign key.
+        return self._result.model_copy(update={"meeting_id": meeting_id})

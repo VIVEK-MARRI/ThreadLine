@@ -23,3 +23,22 @@ def test_retry_does_not_duplicate_execution_after_success():
     assert worker.run_once(datetime(2026, 1, 1, tzinfo=timezone.utc)) is None
     assert calls == ["e1"]
     assert repository.list()[0].status == BackgroundJobStatus.SUCCEEDED
+
+
+def test_new_processing_revision_gets_a_new_durable_job():
+    repository = InMemoryBackgroundJobRepository()
+    scheduler = BackgroundJobScheduler(repository)
+
+    first = scheduler.enqueue(
+        BackgroundJobType.MEETING_PROCESSING,
+        "meeting-1",
+        processing_revision="revision-1",
+    )
+    second = scheduler.enqueue(
+        BackgroundJobType.MEETING_PROCESSING,
+        "meeting-1",
+        processing_revision="revision-2",
+    )
+
+    assert first.job_id != second.job_id
+    assert len(repository.list()) == 2

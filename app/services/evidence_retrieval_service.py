@@ -245,6 +245,47 @@ class EvidenceRetrievalService:
         unique = {item.evidence_id: item for item in items}
         return list(unique.values())
 
+    def build_semantic_evidence_for_meeting(
+        self,
+        meeting_id: str,
+        entity_ids: list[str],
+        current_time: datetime,
+        include_source_text: bool = True,
+    ) -> list[EvidenceItem]:
+        """Build only evidence affected by one meeting processing operation."""
+        intents = (
+            QueryIntent.ENTITY_STATUS,
+            QueryIntent.ENTITY_HISTORY,
+            QueryIntent.ENTITY_RISKS,
+            QueryIntent.ENTITY_DEPENDENCIES,
+            QueryIntent.ENTITY_IMPACTS,
+            QueryIntent.ENTITY_ACTIONS,
+            QueryIntent.ENTITY_CHANGES,
+        )
+        items: list[EvidenceItem] = []
+        for entity_id in sorted(set(entity_ids)):
+            for intent in intents:
+                items.extend(
+                    item
+                    for item in self.retrieve_evidence(
+                        intent, entity_id, current_time, 1000, include_source_text
+                    )
+                    if item.meeting_id == meeting_id
+                )
+        for intent in (
+            QueryIntent.ORGANISATION_CHANGES,
+            QueryIntent.ORGANISATION_PRIORITIES,
+            QueryIntent.ORGANISATION_RISKS,
+        ):
+            items.extend(
+                item
+                for item in self.retrieve_evidence(
+                    intent, None, current_time, 1000, include_source_text
+                )
+                if item.meeting_id == meeting_id
+            )
+        return list({item.evidence_id: item for item in items}.values())
+
     # -----------------------------------------------------------------------
     # Builders
     # -----------------------------------------------------------------------
@@ -398,8 +439,8 @@ class EvidenceRetrievalService:
             summary = f"Insight ({ins.insight_type.value}): {ins.title}. {ins.description}"
             
             source_text = None
-            if include_source_text and ins.evidence and ins.evidence[0].source_text:
-                source_text = ins.evidence[0].source_text
+            if include_source_text and ins.evidence:
+                source_text = ins.evidence
                 
             ref = "Insight Engine"
             if ins.related_meeting_id:
@@ -558,14 +599,18 @@ class EvidenceRetrievalService:
         
         for chg in changes:
             weight_map = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "INFO": 1}
-            weight = weight_map.get(chg.severity.value, 1)
+            severity = getattr(chg.severity, "value", chg.severity)
+            change_type = getattr(chg.change_type, "value", chg.change_type)
+            weight = weight_map.get(severity, 1)
             
             e = self._entity_repo.get_by_id(chg.entity_id)
             name = e.canonical_name if e else chg.entity_id
             
-            summary = f"Organisation Change ({chg.change_type.value}) for '{name}'. "
+            summary = f"Organisation Change ({change_type}) for '{name}'. "
             if chg.previous_state and chg.current_state:
-                summary += f"State: {chg.previous_state.value} -> {chg.current_state.value}."
+                previous_state = getattr(chg.previous_state, "value", chg.previous_state)
+                current_state = getattr(chg.current_state, "value", chg.current_state)
+                summary += f"State: {previous_state} -> {current_state}."
             
             source_text = None
             if include_source_text and chg.source_text:

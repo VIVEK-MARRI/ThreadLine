@@ -141,6 +141,11 @@ class ExtractionResult(BaseModel):
     extracted_at: datetime = Field(
         ..., description="UTC timestamp when this extraction was produced."
     )
+    source_revision: int = Field(
+        default=1,
+        ge=1,
+        description="Authoritative meeting source revision used for extraction.",
+    )
     issues: list[Issue] = Field(
         default_factory=list,
         description="Problems or blockers explicitly mentioned.",

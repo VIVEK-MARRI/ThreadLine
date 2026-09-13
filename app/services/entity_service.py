@@ -171,6 +171,7 @@ class EntityService:
         text: str,
         meeting_id: str,
         source_text: str,
+        source_revision: int = 1,
     ) -> EntityMention:
         """Register an observed mention and attempt exact-match resolution.
 
@@ -235,6 +236,7 @@ class EntityService:
             entity_id=entity_id,
             resolution_status=status,
             created_at=datetime.now(tz=timezone.utc),
+            source_revision=source_revision,
         )
         self._mention_repo.create(mention)
 

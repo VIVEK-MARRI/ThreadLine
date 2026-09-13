@@ -122,10 +122,19 @@ class DependencyResolutionService:
         entity_repo: AbstractEntityRepository,
         mention_repo: AbstractMentionRepository,
         dependency_repo: AbstractDependencyRepository,
+        ownership_checker=None,
     ) -> None:
         self._entity_repo = entity_repo
         self._mention_repo = mention_repo
         self._dependency_repo = dependency_repo
+        self._ownership_checker = ownership_checker
+
+    def set_ownership_checker(self, checker) -> None:
+        self._ownership_checker = checker
+
+    def _assert_owned(self) -> None:
+        if self._ownership_checker is not None:
+            self._ownership_checker()
 
     def resolve_mention_dependencies(self, mention_id: str) -> list[ExplicitDependency]:
         """Resolve explicit dependencies from a single entity mention.
@@ -260,8 +269,10 @@ class DependencyResolutionService:
                 source_text=stmt.source_text,
                 meeting_id=mention.meeting_id,
                 mention_id=mention_id,
+                source_revision=int(getattr(mention, "source_revision", 1) or 1),
             )
 
+            self._assert_owned()
             self._dependency_repo.save(dependency)
             resolved.append(dependency)
 

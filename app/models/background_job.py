@@ -39,6 +39,7 @@ class BackgroundJob(BaseModel):
     error_type: Optional[str] = None
     last_error: Optional[str] = None
     attempts: int = Field(default=0, ge=0)
+    processing_revision: Optional[str] = None
 
     @property
     def error(self) -> Optional[str]:

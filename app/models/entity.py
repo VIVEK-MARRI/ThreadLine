@@ -180,6 +180,16 @@ class EntityMention(BaseModel):
         ..., description="UTC timestamp when this mention was registered."
     )
 
+    source_revision: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Authoritative meeting source revision this observation was made from. "
+            "Ties durable mention state to an explicit source revision so that "
+            "revision N mentions never masquerade as revision N+1."
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Entity Candidate

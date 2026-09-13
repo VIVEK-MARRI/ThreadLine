@@ -12,7 +12,7 @@ from threading import RLock
 from typing import Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 class SQLiteSourceStore:
@@ -118,6 +118,41 @@ class SQLiteSourceStore:
                     "ON background_jobs(status, next_retry_at, created_at)"
                 )
                 connection.execute("INSERT INTO schema_version(version) VALUES (2)")
+                current = 2
+            if current < 3:
+                connection.execute(
+                    "ALTER TABLE meetings ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 1"
+                )
+                connection.execute(
+                    "ALTER TABLE background_jobs ADD COLUMN processing_revision TEXT"
+                )
+                connection.execute("INSERT INTO schema_version(version) VALUES (3)")
+                current = 3
+            if current < 4:
+                for _table, _column in (
+                    ("entity_mentions", "source_revision"),
+                    ("dependencies", "source_revision"),
+                    ("extraction_results", "source_revision"),
+                ):
+                    _cols = {
+                        row[1]
+                        for row in connection.execute(
+                            f"PRAGMA table_info({_table})"
+                        ).fetchall()
+                    }
+                    if _column not in _cols:
+                        connection.execute(
+                            f"ALTER TABLE {_table} ADD COLUMN {_column} INTEGER NOT NULL DEFAULT 1"
+                        )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_mentions_meeting_revision "
+                    "ON entity_mentions(meeting_id, source_revision)"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_dependencies_meeting_revision "
+                    "ON dependencies(meeting_id, source_revision)"
+                )
+                connection.execute("INSERT INTO schema_version(version) VALUES (4)")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

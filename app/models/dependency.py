@@ -114,3 +114,12 @@ class ExplicitDependency(BaseModel):
         ...,
         description="ID of the resolved entity mention containing the evidence.",
     )
+
+    source_revision: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Authoritative meeting source revision this dependency was derived from. "
+            "Prevents revision-N derived state from masquerading as current revision N+1."
+        ),
+    )

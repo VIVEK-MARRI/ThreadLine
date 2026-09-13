@@ -49,6 +49,7 @@ class SemanticIndexingService:
         repository: AbstractSemanticIndexRepository,
         embedding_model_name: str = "fake",
         representation_version: str = "1.0",
+        ownership_checker=None,
     ) -> None:
         """
         Parameters
@@ -62,15 +63,29 @@ class SemanticIndexingService:
         representation_version:
             Version of the representation scheme. Default: "1.0".
             Increment this when representation logic changes.
+        ownership_checker:
+            Optional callable raising on stale worker ownership loss.
+            Checked before every durable semantic write so a stale worker
+            cannot commit conflicting semantic state.
         """
         self._embedding_provider = embedding_provider
         self._repository = repository
         self._embedding_model_name = embedding_model_name
         self._representation_version = representation_version
+        self._ownership_checker = ownership_checker
+
+    def set_ownership_checker(self, checker) -> None:
+        self._ownership_checker = checker
+
+    def _assert_owned(self) -> None:
+        if self._ownership_checker is not None:
+            self._ownership_checker()
 
     def index_evidence(
         self,
         evidence_item: EvidenceItem,
+        source_revision: int | None = None,
+        meeting_id: str | None = None,
     ) -> SemanticIndexRecord:
         """Index a single evidence item.
 
@@ -109,13 +124,64 @@ class SemanticIndexingService:
             representation_version=self._representation_version,
         )
 
+        # Stale-revision guard inputs (shared by reuse + write paths).
+        incoming_revision = source_revision
+        if incoming_revision is None:
+            incoming_revision = getattr(evidence_item, "source_revision", None)
+        # meeting_id is carried on EvidenceItem.meeting_id; prefer explicit arg.
+        resolved_meeting_id = meeting_id if meeting_id is not None else getattr(evidence_item, "meeting_id", None)
+        if incoming_revision is not None:
+            try:
+                incoming_revision = int(incoming_revision)
+            except (TypeError, ValueError):
+                incoming_revision = None
+
         if existing and existing.representation_hash == representation_hash:
-            # Embedding is still valid; reuse it
-            logger.debug(
-                f"Reusing embedding for {evidence_item.evidence_id} "
-                f"(hash unchanged)"
+            # Embedding is still valid; reuse the vector.  When the incoming
+            # source revision is newer, advance the durable revision marker
+            # (same embedding, new currency) so revision N never masquerades
+            # as N+1 while still avoiding a re-embed.
+            existing_revision = getattr(existing, "source_revision", None)
+            needs_advance = (
+                incoming_revision is not None
+                and (existing_revision is None or int(incoming_revision) != int(existing_revision))
             )
-            return existing
+            if not needs_advance:
+                logger.debug(
+                    f"Reusing embedding for {evidence_item.evidence_id} "
+                    f"(hash unchanged)"
+                )
+                return existing
+            if existing_revision is not None and int(incoming_revision) < int(existing_revision):
+                from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                raise StaleJobOwnershipError(
+                    f"stale semantic write rejected for {evidence_item.evidence_id}: "
+                    f"incoming revision {incoming_revision} < durable revision {existing_revision}"
+                )
+            self._assert_owned()
+            updated = existing.model_copy(update={
+                "source_revision": int(incoming_revision),
+                "meeting_id": resolved_meeting_id if resolved_meeting_id is not None else existing.meeting_id,
+                "indexed_at": datetime.now(timezone.utc),
+            })
+            persisted = self._repository.upsert(updated)
+            logger.debug(f"Advanced semantic revision for {evidence_item.evidence_id} to {incoming_revision}")
+            return persisted
+
+        if existing is not None and incoming_revision is not None:
+            existing_revision = getattr(existing, "source_revision", None)
+            if existing_revision is not None and int(incoming_revision) < int(existing_revision):
+                from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                raise StaleJobOwnershipError(
+                    f"stale semantic write rejected for {evidence_item.evidence_id}: "
+                    f"incoming revision {incoming_revision} < durable revision {existing_revision}"
+                )
+
+        # Ownership guard before any durable mutation: a worker that lost its
+        # lease must not commit semantic state.
+        self._assert_owned()
 
         # 4. Generate new embedding
         embedding = self._embedding_provider.embed_text(representation)
@@ -130,6 +196,8 @@ class SemanticIndexingService:
             representation_version=self._representation_version,
             source_reference=evidence_item.source_reference,
             indexed_at=datetime.now(timezone.utc),
+            source_revision=int(incoming_revision) if incoming_revision is not None else None,
+            meeting_id=resolved_meeting_id,
         )
 
         persisted = self._repository.upsert(record)

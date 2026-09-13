@@ -47,10 +47,19 @@ class ExtractionService:
         meeting_repository: AbstractMeetingRepository,
         extraction_repository: AbstractExtractionRepository,
         provider: AbstractExtractionProvider,
+        ownership_checker=None,
     ) -> None:
         self._meeting_repo = meeting_repository
         self._extraction_repo = extraction_repository
         self._provider = provider
+        self._ownership_checker = ownership_checker
+
+    def set_ownership_checker(self, checker) -> None:
+        self._ownership_checker = checker
+
+    def _assert_owned(self) -> None:
+        if self._ownership_checker is not None:
+            self._ownership_checker()
 
     def extract_meeting(self, meeting_id: str) -> ExtractionResult:
         """Run information extraction on a stored meeting transcript.
@@ -87,7 +96,20 @@ class ExtractionService:
             transcript=meeting.transcript,
             meeting_id=meeting_id,
         )
+        result = result.model_copy(update={"source_revision": meeting.source_revision})
 
+        # A stale worker that lost its lease must not overwrite extraction
+        # derived from a newer source revision with older state.
+        if self._ownership_checker is not None:
+            self._ownership_checker()
+        existing = self._extraction_repo.get_by_meeting_id(meeting_id)
+        if existing is not None and int(result.source_revision) < int(existing.source_revision):
+            from app.repositories.background_job_repository import StaleJobOwnershipError
+
+            raise StaleJobOwnershipError(
+                f"stale extraction write rejected for {meeting_id}: "
+                f"incoming revision {result.source_revision} < durable revision {existing.source_revision}"
+            )
         self._extraction_repo.save(result)
         logger.info(
             "ExtractionService: saved extraction result for meeting=%s", meeting_id

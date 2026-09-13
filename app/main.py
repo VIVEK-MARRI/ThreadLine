@@ -19,7 +19,7 @@ from app.api.changes import router as changes_router
 from app.api.query import router as query_router
 from app.api.jobs import router as jobs_router
 from app.schemas.meeting import HealthResponse
-from app.api.meetings import get_source_store
+from app.api.meetings import get_source_store, get_meeting_repository
 from app.api.query import _semantic_repository
 from app.api.jobs import get_job_repository
 from app.models.background_job import BackgroundJobType
@@ -48,6 +48,8 @@ from app.api.changes import get_organisation_change_intelligence_service
 from app.api.query import _semantic_indexing_service, get_evidence_retrieval_service
 from app.services.dependency_resolution_service import DependencyResolutionService
 from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrator
+from app.services.entity_observation_service import EntityObservationService
+from app.repositories.background_job_repository import StaleJobOwnershipError
 
 _application_worker: BackgroundWorkerService | None = None
 _worker_thread: threading.Thread | None = None
@@ -100,13 +102,37 @@ def _build_application_worker() -> BackgroundWorkerService:
             lambda entity_id, now: dependency_graph.build_dependency_graph(entity_id),
             lambda entity_id, now: impact.get_entity_impacts(entity_id, now),
             lambda entity_id, now: changes.get_changes(current_time=now, entity_id=entity_id),
-            lambda entity_id, now: portfolio.get_portfolio(now),
         ),
+        organisation_derived_services=(lambda now: portfolio.get_portfolio(now),),
+        observation_service=EntityObservationService(
+            get_meeting_repository(), _entity_repository, _mention_repository
+        ),
+        meeting_repository=get_meeting_repository(),
     )
 
     def process_meeting(job):
+        def assert_owned():
+            current = repository.get(job.job_id)
+            now = datetime.now(timezone.utc)
+            if (
+                current is None
+                or current.status.value != "RUNNING"
+                or current.worker_id != job.worker_id
+                or current.lease_until is None
+                or current.lease_until <= now
+                or current.processing_revision != job.processing_revision
+            ):
+                raise StaleJobOwnershipError(
+                    f"worker {job.worker_id} no longer owns processing revision "
+                    f"{job.processing_revision} for {job.job_id}"
+                )
+
+        pipeline.set_ownership_checker(assert_owned)
+        extraction_service = get_extraction_service()
+        if hasattr(extraction_service, "set_ownership_checker"):
+            extraction_service.set_ownership_checker(assert_owned)
         handlers = {
-            ProcessingStage.EXTRACTED: lambda meeting_id: get_extraction_service().extract_meeting(meeting_id),
+            ProcessingStage.EXTRACTED: lambda meeting_id: extraction_service.extract_meeting(meeting_id),
             ProcessingStage.RESOLVED: pipeline.resolve_meeting,
             ProcessingStage.RELATIONSHIPS_PERSISTED: pipeline.persist_relationships,
             ProcessingStage.DERIVED_INTELLIGENCE: pipeline.derive_intelligence,

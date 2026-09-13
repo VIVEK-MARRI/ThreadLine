@@ -98,6 +98,24 @@ class SemanticIndexRecord(BaseModel):
         description="Index metadata: when this record was created/updated.",
     )
 
+    source_revision: int | None = Field(
+        default=None,
+        description=(
+            "Authoritative meeting source revision this semantic evidence was "
+            "derived from. None for legacy records written before revision "
+            "tracking. A record from revision N must never masquerade as "
+            "current revision N+1."
+        ),
+    )
+
+    meeting_id: str | None = Field(
+        default=None,
+        description=(
+            "Source meeting this semantic evidence was derived from, when known. "
+            "Used for meeting-scoped consistency checks and incremental indexing."
+        ),
+    )
+
     def __hash__(self):
         """Hash by composite identity."""
         return hash((self.evidence_id, self.embedding_model, self.representation_version))
