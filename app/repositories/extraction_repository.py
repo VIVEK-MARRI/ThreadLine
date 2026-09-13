@@ -48,6 +48,14 @@ class InMemoryExtractionRepository(AbstractExtractionRepository):
 
     def save(self, result: ExtractionResult) -> None:
         """Store (or overwrite) the extraction result for result.meeting_id."""
+        existing = self._store.get(result.meeting_id)
+        if existing is not None and int(result.source_revision) < int(existing.source_revision):
+            from app.repositories.background_job_repository import StaleJobOwnershipError
+
+            raise StaleJobOwnershipError(
+                f"stale extraction write rejected for {result.meeting_id}: "
+                f"incoming revision {result.source_revision} < durable revision {existing.source_revision}"
+            )
         self._store[result.meeting_id] = result
 
     def get_by_meeting_id(self, meeting_id: str) -> Optional[ExtractionResult]:

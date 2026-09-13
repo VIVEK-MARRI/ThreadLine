@@ -284,23 +284,38 @@ def revise_meeting(
     from app.api.jobs import get_job_scheduler
     from app.services.processing_consistency_service import processing_revision_for
 
-    try:
-        meeting = service.revise_meeting(meeting_id, request)
-    except KeyError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    # Concurrent refreshes: exactly one revision ordering is authoritative.
+    # If two requests both read N and try to write N+1, the loser gets a
+    # MeetingConflictError from the monotonic guard and retries as N+2.
+    # Result is always N+1 then N+2, never two ambiguous currents.
+    last_conflict: Exception | None = None
+    for _ in range(3):
+        try:
+            meeting = service.revise_meeting(meeting_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except MeetingConflictError as exc:
+            last_conflict = exc
+            # Re-read current revision and retry (service reads fresh state).
+            continue
 
-    scheduler = get_job_scheduler()
-    job = scheduler.build_job(
-        BackgroundJobType.MEETING_PROCESSING,
-        meeting_id,
-        processing_revision=processing_revision_for(meeting.source_revision),
-    )
-    if isinstance(_meeting_repository, SQLiteMeetingRepository):
-        _meeting_repository.save_and_enqueue(meeting, job)
-    else:
-        _meeting_repository.save(meeting)
-        scheduler._repository.enqueue(job)
-    return MeetingIngestResponse(meeting_id=meeting_id, status="revisioned")
+        scheduler = get_job_scheduler()
+        job = scheduler.build_job(
+            BackgroundJobType.MEETING_PROCESSING,
+            meeting_id,
+            processing_revision=processing_revision_for(meeting.source_revision),
+        )
+        try:
+            if isinstance(_meeting_repository, SQLiteMeetingRepository):
+                _meeting_repository.save_and_enqueue(meeting, job)
+            else:
+                _meeting_repository.save(meeting)
+                scheduler._repository.enqueue(job)
+        except MeetingConflictError as exc:
+            last_conflict = exc
+            continue
+        return MeetingIngestResponse(meeting_id=meeting_id, status="revisioned")
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(last_conflict) if last_conflict else "concurrent revision conflict")
 
 
 @router.post(

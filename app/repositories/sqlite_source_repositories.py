@@ -27,6 +27,27 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
 
     def save(self, meeting: Meeting) -> None:
         with self._store.transaction() as connection:
+            row = connection.execute(
+                "SELECT source_revision, payload FROM meetings WHERE meeting_id = ?",
+                (meeting.meeting_id,),
+            ).fetchone()
+            if row is not None:
+                current_rev = int(row["source_revision"] or 1)
+                if int(meeting.source_revision) < current_rev:
+                    from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                    raise StaleJobOwnershipError(
+                        f"stale source write rejected for {meeting.meeting_id}: "
+                        f"incoming revision {meeting.source_revision} < durable revision {current_rev}"
+                    )
+                if int(meeting.source_revision) == current_rev and row["payload"] != _dump(meeting):
+                    # Same revision number with different payload: concurrent
+                    # refresh lost-update. Caller must re-read and retry as N+1.
+                    from app.services.meeting_service import MeetingConflictError
+
+                    raise MeetingConflictError(
+                        f"concurrent source refresh for '{meeting.meeting_id}' at revision {current_rev}; retry as revision {current_rev + 1}"
+                    )
             connection.execute(
                 "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload",
@@ -35,6 +56,25 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
 
     def save_and_enqueue(self, meeting: Meeting, job: BackgroundJob) -> None:
         with self._store.transaction() as connection:
+            row = connection.execute(
+                "SELECT source_revision, payload FROM meetings WHERE meeting_id = ?",
+                (meeting.meeting_id,),
+            ).fetchone()
+            if row is not None:
+                current_rev = int(row["source_revision"] or 1)
+                if int(meeting.source_revision) < current_rev:
+                    from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                    raise StaleJobOwnershipError(
+                        f"stale source write rejected for {meeting.meeting_id}: "
+                        f"incoming revision {meeting.source_revision} < durable revision {current_rev}"
+                    )
+                if int(meeting.source_revision) == current_rev and row["payload"] != _dump(meeting):
+                    from app.services.meeting_service import MeetingConflictError
+
+                    raise MeetingConflictError(
+                        f"concurrent source refresh for '{meeting.meeting_id}' at revision {current_rev}; retry as revision {current_rev + 1}"
+                    )
             connection.execute(
                 "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload",
@@ -63,6 +103,17 @@ class SQLiteExtractionRepository(AbstractExtractionRepository):
 
     def save(self, result: ExtractionResult) -> None:
         with self._store.transaction() as connection:
+            row = connection.execute(
+                "SELECT source_revision FROM extraction_results WHERE meeting_id = ?",
+                (result.meeting_id,),
+            ).fetchone()
+            if row is not None and int(result.source_revision) < int(row["source_revision"] or 1):
+                from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                raise StaleJobOwnershipError(
+                    f"stale extraction write rejected for {result.meeting_id}: "
+                    f"incoming revision {result.source_revision} < durable revision {row['source_revision']}"
+                )
             connection.execute(
                 "INSERT INTO extraction_results(meeting_id, extracted_at, payload, source_revision) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(meeting_id) DO UPDATE SET extracted_at=excluded.extracted_at, payload=excluded.payload, source_revision=excluded.source_revision",
@@ -135,6 +186,19 @@ class SQLiteMentionRepository(AbstractMentionRepository):
 
     def create(self, mention: EntityMention) -> None:
         with self._store.transaction() as connection:
+            meeting_row = connection.execute(
+                "SELECT source_revision FROM meetings WHERE meeting_id = ?",
+                (mention.meeting_id,),
+            ).fetchone()
+            if meeting_row is not None:
+                current_rev = int(meeting_row["source_revision"] or 1)
+                if int(mention.source_revision) < current_rev:
+                    from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                    raise StaleJobOwnershipError(
+                        f"stale mention write rejected for meeting {mention.meeting_id}: "
+                        f"mention revision {mention.source_revision} < current source revision {current_rev}"
+                    )
             connection.execute(
                 "INSERT INTO entity_mentions(mention_id, meeting_id, entity_id, entity_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(mention_id) DO UPDATE SET meeting_id=excluded.meeting_id, entity_id=excluded.entity_id, entity_type=excluded.entity_type, payload=excluded.payload, source_revision=excluded.source_revision",
@@ -169,6 +233,19 @@ class SQLiteDependencyRepository(AbstractDependencyRepository):
 
     def save(self, dependency: ExplicitDependency) -> None:
         with self._store.transaction() as connection:
+            meeting_row = connection.execute(
+                "SELECT source_revision FROM meetings WHERE meeting_id = ?",
+                (dependency.meeting_id,),
+            ).fetchone()
+            if meeting_row is not None:
+                current_rev = int(meeting_row["source_revision"] or 1)
+                if int(dependency.source_revision) < current_rev:
+                    from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                    raise StaleJobOwnershipError(
+                        f"stale dependency write rejected for meeting {dependency.meeting_id}: "
+                        f"dependency revision {dependency.source_revision} < current source revision {current_rev}"
+                    )
             connection.execute(
                 "INSERT INTO dependencies(dependency_id, source_entity_id, target_entity_id, meeting_id, relationship_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(dependency_id) DO UPDATE SET source_entity_id=excluded.source_entity_id, target_entity_id=excluded.target_entity_id, meeting_id=excluded.meeting_id, relationship_type=excluded.relationship_type, payload=excluded.payload, source_revision=excluded.source_revision",

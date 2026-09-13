@@ -30,6 +30,9 @@ class SQLiteSourceStore:
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA journal_mode = WAL")
+        # Serialize concurrent writers across connections/processes instead of
+        # failing immediately with "database is locked".
+        self._connection.execute("PRAGMA busy_timeout = 5000")
         self._migrate()
 
     def _migrate(self) -> None:

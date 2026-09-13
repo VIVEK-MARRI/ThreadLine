@@ -31,6 +31,9 @@ def test_meeting_survives_repository_recreation(tmp_path):
 def test_meeting_upsert_preserves_identity(tmp_path):
     repository = SQLiteMeetingRepository(SQLiteSourceStore(tmp_path / "source.db"))
     repository.save(meeting())
-    updated = meeting().model_copy(update={"title": "Payments Review"})
+    # Source mutations must advance the durable revision: same-revision
+    # overwrites with different payload are rejected as concurrent conflicts
+    # (see monotonic guard), so the update carries revision 2.
+    updated = meeting().model_copy(update={"title": "Payments Review", "source_revision": 2})
     repository.save(updated)
     assert repository.get_by_id("m1").title == "Payments Review"

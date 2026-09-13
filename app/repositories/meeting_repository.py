@@ -45,7 +45,22 @@ class InMemoryMeetingRepository(AbstractMeetingRepository):
         self._store: dict[str, Meeting] = {}
 
     def save(self, meeting: Meeting) -> None:
-        """Store a meeting in the in-memory dictionary."""
+        """Store a meeting with monotonic revision guard."""
+        existing = self._store.get(meeting.meeting_id)
+        if existing is not None:
+            if int(meeting.source_revision) < int(existing.source_revision):
+                from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                raise StaleJobOwnershipError(
+                    f"stale source write rejected for {meeting.meeting_id}: "
+                    f"incoming revision {meeting.source_revision} < durable revision {existing.source_revision}"
+                )
+            if int(meeting.source_revision) == int(existing.source_revision) and meeting.model_dump(mode="json") != existing.model_dump(mode="json"):
+                from app.services.meeting_service import MeetingConflictError
+
+                raise MeetingConflictError(
+                    f"concurrent source refresh for '{meeting.meeting_id}' at revision {existing.source_revision}; retry as revision {existing.source_revision + 1}"
+                )
         self._store[meeting.meeting_id] = meeting
 
     def get_by_id(self, meeting_id: str) -> Optional[Meeting]:
