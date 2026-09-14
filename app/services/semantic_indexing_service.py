@@ -50,6 +50,7 @@ class SemanticIndexingService:
         embedding_model_name: str = "fake",
         representation_version: str = "1.0",
         ownership_checker=None,
+        current_revision_lookup: "Callable[[str | None], int | None] | None" = None,
     ) -> None:
         """
         Parameters
@@ -67,12 +68,20 @@ class SemanticIndexingService:
             Optional callable raising on stale worker ownership loss.
             Checked before every durable semantic write so a stale worker
             cannot commit conflicting semantic state.
+        current_revision_lookup:
+            Callable mapping an optional meeting_id to its authoritative
+            current source revision (int).  When provided, every semantic
+            index write is validated against the meeting's authoritative
+            source revision at write time: incoming < current → stale,
+            incoming > current → future (would masquerade as current).
+            None lookup → guard skipped (legacy/unknown meeting).
         """
         self._embedding_provider = embedding_provider
         self._repository = repository
         self._embedding_model_name = embedding_model_name
         self._representation_version = representation_version
         self._ownership_checker = ownership_checker
+        self._current_revision_lookup = current_revision_lookup
 
     def set_ownership_checker(self, checker) -> None:
         self._ownership_checker = checker
@@ -135,6 +144,28 @@ class SemanticIndexingService:
                 incoming_revision = int(incoming_revision)
             except (TypeError, ValueError):
                 incoming_revision = None
+
+        # Authoritative meeting source revision guard (P6/P8):
+        # Validates against the meeting's current source revision at write
+        # time, catching both stale (incoming < current) and future
+        # (incoming > current, would masquerade as current) semantic writes.
+        if incoming_revision is not None and self._current_revision_lookup is not None:
+            current_meeting_rev = self._current_revision_lookup(resolved_meeting_id)
+            if current_meeting_rev is not None:
+                if incoming_revision < current_meeting_rev:
+                    from app.repositories.background_job_repository import StaleJobOwnershipError
+
+                    raise StaleJobOwnershipError(
+                        f"stale semantic write rejected for {evidence_item.evidence_id}: "
+                        f"incoming revision {incoming_revision} < authoritative meeting revision {current_meeting_rev}"
+                    )
+                if incoming_revision > current_meeting_rev:
+                    from app.services.processing_consistency_service import FutureRevisionError
+
+                    raise FutureRevisionError(
+                        f"future semantic write rejected for {evidence_item.evidence_id}: "
+                        f"incoming revision {incoming_revision} > authoritative meeting revision {current_meeting_rev}"
+                    )
 
         if existing and existing.representation_hash == representation_hash:
             # Embedding is still valid; reuse the vector.  When the incoming

@@ -157,15 +157,22 @@ class DependencyGraphService:
     entity_repo:
         Repository of canonical entities.  Used to validate that traversal
         targets actually exist — missing entities are silently skipped.
+    current_revision_lookup:
+        Optional callable mapping a meeting_id to its authoritative current
+        source revision.  When provided, only dependency records that provably
+        target the current source revision participate in the graph so a
+        revision-N edge never masquerades as current N+1.
     """
 
     def __init__(
         self,
         dependency_repo: AbstractDependencyRepository,
         entity_repo: AbstractEntityRepository,
+        current_revision_lookup=None,
     ) -> None:
         self._dependency_repo = dependency_repo
         self._entity_repo = entity_repo
+        self._current_revision_lookup = current_revision_lookup
 
     # ------------------------------------------------------------------
     # Public API
@@ -275,8 +282,10 @@ class DependencyGraphService:
         if self._entity_repo.get_by_id(entity_id) is None:
             raise EntityNotFoundError(f"Entity '{entity_id}' not found.")
 
-        # Get all deps where entity_id is the TARGET
-        incoming_deps = self._dependency_repo.list_by_target_entity_id(entity_id)
+        # Get all deps where entity_id is the TARGET (current revision only).
+        incoming_deps = self._dependency_repo.list_current_by_target_entity_id(
+            entity_id, self._current_revision_lookup
+        )
 
         # Aggregate by logical edge
         grouped = _aggregate_edges(incoming_deps)
@@ -357,7 +366,9 @@ class DependencyGraphService:
         CO_OCCURS_WITH is never stored in ExplicitDependency, so no
         explicit filtering is needed — but the check is present for safety.
         """
-        raw = self._dependency_repo.list_by_source_entity_id(entity_id)
+        raw = self._dependency_repo.list_current_by_source_entity_id(
+            entity_id, self._current_revision_lookup
+        )
         # Filter to traversal types only (safety guard)
         raw = [
             d for d in raw

@@ -56,6 +56,7 @@ from app.services.processing_consistency_service import (
 from app.services.resolution_service import ResolutionService
 from app.services.semantic_indexing_service import SemanticIndexingService
 from app.repositories.semantic_index_repository import JsonFileSemanticIndexRepository
+from tests._clock_utils import MutableClock
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -81,15 +82,21 @@ class _Evidence:
         return []
 
 
-def _stack(tmp_path, name="audit.db"):
+def _stack(tmp_path, name="audit.db", clock=None):
     store = SQLiteSourceStore(tmp_path / name)
     meetings, extractions = SQLiteMeetingRepository(store), SQLiteExtractionRepository(store)
     entities, mentions = SQLiteEntityRepository(store), SQLiteMentionRepository(store)
     deps = SQLiteDependencyRepository(store)
-    jobs = SQLiteBackgroundJobRepository(store)
+    jobs = SQLiteBackgroundJobRepository(store, clock=clock)
     sched = BackgroundJobScheduler(jobs)
     sem_repo = JsonFileSemanticIndexRepository(tmp_path / f"{name}.semantic.json")
-    sem = SemanticIndexingService(FakeEmbeddingProvider(), sem_repo, "fake", "1.0")
+    def _current_rev(meeting_id):
+        m = meetings.get_by_id(meeting_id) if meeting_id is not None else None
+        return int(getattr(m, "source_revision", 1) or 1) if m is not None else None
+    sem = SemanticIndexingService(
+        FakeEmbeddingProvider(), sem_repo, "fake", "1.0",
+        current_revision_lookup=_current_rev,
+    )
     scoring = CandidateScoringService(mentions, entities, LexicalCandidateGenerator(), LexicalCandidateScorer())
     resolution = ResolutionService(mentions, entities, scoring, ThresholdResolutionPolicy())
     dep_res = DependencyResolutionService(entities, mentions, deps)
@@ -256,8 +263,8 @@ def test_audit_consistency_statuses(tmp_path):
     s2["sched"].enqueue(BackgroundJobType.MEETING_PROCESSING, "m-cs",
                         processing_revision=processing_revision_for(1))
     t = datetime.now(timezone.utc)
-    claimed = s2["jobs"].claim(jid, "w", t, 60)
-    s2["jobs"].transition(jid, BackgroundJobStatus.FAILED, t, owner_id="w",
+    claimed = s2["jobs"].claim(jid, "w", 60)
+    s2["jobs"].transition(jid, BackgroundJobStatus.FAILED, owner_id="w",
                           last_error="x", error_type="PERMANENT")
     st2 = _status("m-cs", s2)
     assert st2["is_current"] is False and st2["status"] == "FAILED"
@@ -269,9 +276,9 @@ def test_audit_consistency_statuses(tmp_path):
     s3["sched"].enqueue(BackgroundJobType.MEETING_PROCESSING, "m-cs",
                         processing_revision=processing_revision_for(1))
     t = datetime.now(timezone.utc)
-    c = s3["jobs"].claim(f"MEETING_PROCESSING:m-cs:1", "w", t, 60)
-    s3["jobs"].checkpoint(c.job_id, "COMPLETED", "w", t)
-    s3["jobs"].transition(c.job_id, BackgroundJobStatus.SUCCEEDED, t, owner_id="w")
+    c = s3["jobs"].claim(f"MEETING_PROCESSING:m-cs:1", "w", 60)
+    s3["jobs"].checkpoint(c.job_id, "COMPLETED", "w")
+    s3["jobs"].transition(c.job_id, BackgroundJobStatus.SUCCEEDED, owner_id="w")
     # Advance source without processing new revision.
     cur = s3["meetings"].get_by_id("m-cs")
     s3["meetings"].save(cur.model_copy(update={"transcript": "v2", "source_revision": 2}))
@@ -581,32 +588,32 @@ def test_audit_restart_is_cross_process():
 # ---------------------------------------------------------------------------
 
 def test_audit_old_worker_cannot_commit_after_takeover(tmp_path):
-    s = _stack(tmp_path, "takeover.db")
+    clock = MutableClock(datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
+    s = _stack(tmp_path, "takeover.db", clock=clock)
     MeetingService(s["meetings"]).ingest_meeting(MeetingIngestRequest(
         meeting_id="m-take", title="T", transcript="hi", meeting_date=NOW))
     s["sched"].enqueue(BackgroundJobType.MEETING_PROCESSING, "m-take",
                        processing_revision=processing_revision_for(1))
     jid = "MEETING_PROCESSING:m-take:1"
-    t0 = datetime.now(timezone.utc)
-    a = s["jobs"].claim(jid, "worker-A", t0, lease_seconds=1)
-    assert a is not None
+    a = s["jobs"].claim(jid, "worker-A", lease_seconds=1)
+    assert a is not None and a.attempts == 1
     # Lease expires; B recovers and takes over.
-    t1 = t0 + timedelta(seconds=2)
-    s["jobs"].recover_stale(t1)
-    b = s["jobs"].claim(jid, "worker-B", t1, lease_seconds=60)
+    clock.advance(seconds=2)
+    s["jobs"].recover_stale()
+    b = s["jobs"].claim(jid, "worker-B", lease_seconds=60)
     assert b is not None and b.worker_id == "worker-B"
     # Old worker A checkpoint/transition rejected at DB level.
     with pytest.raises(StaleJobOwnershipError):
-        s["jobs"].checkpoint(jid, "EXTRACTED", worker_id="worker-A", now=t1)
+        s["jobs"].checkpoint(jid, "EXTRACTED", worker_id="worker-A")
     with pytest.raises(StaleJobOwnershipError):
-        s["jobs"].transition(jid, BackgroundJobStatus.SUCCEEDED, t1, owner_id="worker-A")
+        s["jobs"].transition(jid, BackgroundJobStatus.SUCCEEDED, owner_id="worker-A")
     # Old worker A derived write rejected via ownership predicate.
     s["orch"].set_ownership_checker(lambda: (_ for _ in ()).throw(StaleJobOwnershipError("A stale")))
     s["extractions"].save(ExtractionResult(meeting_id="m-take", extracted_at=NOW, source_revision=1))
     with pytest.raises(StaleJobOwnershipError):
         s["orch"].derive_intelligence("m-take")
     # New owner B progresses.
-    s["jobs"].checkpoint(jid, "EXTRACTED", worker_id="worker-B", now=t1)
+    s["jobs"].checkpoint(jid, "EXTRACTED", worker_id="worker-B")
     assert s["jobs"].get(jid).stage == "EXTRACTED"
 
 

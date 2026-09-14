@@ -34,10 +34,15 @@ class EntityRelationshipService:
         entity_repo: AbstractEntityRepository,
         mention_repo: AbstractMentionRepository,
         dependency_repo: Optional[AbstractDependencyRepository] = None,
+        current_revision_lookup=None,
     ) -> None:
         self._entity_repo = entity_repo
         self._mention_repo = mention_repo
         self._dependency_repo = dependency_repo
+        # Optional callable mapping meeting_id -> current source revision.
+        # When provided, only current-revision dependencies/mentions shape the
+        # inferred relationships; stale/future evidence never masquerades.
+        self._current_revision_lookup = current_revision_lookup
 
     def get_relationship_graph(self, entity_id: str) -> EntityRelationshipGraph:
         """Return the relationship graph for a specific entity.
@@ -132,14 +137,18 @@ class EntityRelationshipService:
     # ------------------------------------------------------------------
 
     def _get_co_occurrences(self, entity_id: str) -> List[EntityRelationship]:
-        mentions = self._mention_repo.list_by_entity_id(entity_id)
+        mentions = self._mention_repo.list_current_by_entity_id(
+            entity_id, self._current_revision_lookup
+        )
         meeting_ids = {m.meeting_id for m in mentions}
 
         # target_entity_id -> set of meeting_ids where they co-occurred
         co_occurrences: Dict[str, Set[str]] = {}
 
         for meeting_id in meeting_ids:
-            meeting_mentions = self._mention_repo.list_by_meeting_id(meeting_id)
+            meeting_mentions = self._mention_repo.list_current_by_meeting_id(
+                meeting_id, self._current_revision_lookup
+            )
             for m in meeting_mentions:
                 if m.resolution_status == ResolutionStatus.RESOLVED and m.entity_id:
                     # Ignore self-relationships
@@ -183,7 +192,9 @@ class EntityRelationshipService:
         if self._dependency_repo is None:
             return []
             
-        deps = self._dependency_repo.list_by_entity_id(entity_id)
+        deps = self._dependency_repo.list_current_by_entity_id(
+            entity_id, self._current_revision_lookup
+        )
         
         # Deduplicate logical relationships:
         # Keyed by (source_entity_id, target_entity_id, relationship_type)

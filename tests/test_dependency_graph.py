@@ -30,6 +30,18 @@ class MockDependencyRepo:
     def list_by_target_entity_id(self, entity_id: str):
         return [d for d in self.deps if d.target_entity_id == entity_id]
 
+    def list_current_by_source_entity_id(self, entity_id: str, current_revision_lookup=None):
+        return self.list_by_source_entity_id(entity_id)
+
+    def list_current_by_target_entity_id(self, entity_id: str, current_revision_lookup=None):
+        return self.list_by_target_entity_id(entity_id)
+
+    def list_current_by_entity_id(self, entity_id: str, current_revision_lookup=None):
+        return [d for d in self.deps if d.source_entity_id == entity_id or d.target_entity_id == entity_id]
+
+    def list_current_all(self, current_revision_lookup=None):
+        return list(self.deps)
+
 @pytest.fixture
 def entity_repo():
     return MockEntityRepo()

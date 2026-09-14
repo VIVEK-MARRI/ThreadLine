@@ -1,7 +1,7 @@
 """SQLite adapters for the primary ThreadLine repositories."""
 
 import json
-from typing import Optional
+from typing import Callable, Optional
 
 from app.models.dependency import ExplicitDependency
 from app.models.entity import CanonicalEntity, EntityMention, EntityType
@@ -19,6 +19,41 @@ from app.repositories.mention_repository import AbstractMentionRepository
 
 def _dump(model) -> str:
     return json.dumps(model.model_dump(mode="json"), sort_keys=True)
+
+
+def _guard_derived_revision(connection, meeting_id, incoming_revision, *, kind: str) -> None:
+    """Enforce exact source-revision equality for derived writes.
+
+    Derived state may only be written against the exact authoritative source
+    revision of its meeting.  Both directions are rejected:
+      - incoming < current  -> StaleJobOwnershipError (stale worker writing old data)
+      - incoming > current  -> FutureRevisionError  (fabricated future revision
+                               that would masquerade as current later)
+    No authority exists (no meeting row) -> guard is skipped, matching the
+    historical behaviour of callers that register derived rows independently.
+    """
+    row = connection.execute(
+        "SELECT source_revision FROM meetings WHERE meeting_id = ?",
+        (meeting_id,),
+    ).fetchone()
+    if row is None:
+        return
+    current_rev = int(row["source_revision"] or 1)
+    incoming = int(incoming_revision or 1)
+    if incoming < current_rev:
+        from app.repositories.background_job_repository import StaleJobOwnershipError
+
+        raise StaleJobOwnershipError(
+            f"stale {kind} write rejected for meeting {meeting_id}: "
+            f"incoming revision {incoming} < current source revision {current_rev}"
+        )
+    if incoming > current_rev:
+        from app.services.processing_consistency_service import FutureRevisionError
+
+        raise FutureRevisionError(
+            f"future {kind} write rejected for meeting {meeting_id}: "
+            f"incoming revision {incoming} > current source revision {current_rev}"
+        )
 
 
 class SQLiteMeetingRepository(AbstractMeetingRepository):
@@ -103,17 +138,7 @@ class SQLiteExtractionRepository(AbstractExtractionRepository):
 
     def save(self, result: ExtractionResult) -> None:
         with self._store.transaction() as connection:
-            row = connection.execute(
-                "SELECT source_revision FROM extraction_results WHERE meeting_id = ?",
-                (result.meeting_id,),
-            ).fetchone()
-            if row is not None and int(result.source_revision) < int(row["source_revision"] or 1):
-                from app.repositories.background_job_repository import StaleJobOwnershipError
-
-                raise StaleJobOwnershipError(
-                    f"stale extraction write rejected for {result.meeting_id}: "
-                    f"incoming revision {result.source_revision} < durable revision {row['source_revision']}"
-                )
+            _guard_derived_revision(connection, result.meeting_id, result.source_revision, kind="extraction")
             connection.execute(
                 "INSERT INTO extraction_results(meeting_id, extracted_at, payload, source_revision) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(meeting_id) DO UPDATE SET extracted_at=excluded.extracted_at, payload=excluded.payload, source_revision=excluded.source_revision",
@@ -186,19 +211,7 @@ class SQLiteMentionRepository(AbstractMentionRepository):
 
     def create(self, mention: EntityMention) -> None:
         with self._store.transaction() as connection:
-            meeting_row = connection.execute(
-                "SELECT source_revision FROM meetings WHERE meeting_id = ?",
-                (mention.meeting_id,),
-            ).fetchone()
-            if meeting_row is not None:
-                current_rev = int(meeting_row["source_revision"] or 1)
-                if int(mention.source_revision) < current_rev:
-                    from app.repositories.background_job_repository import StaleJobOwnershipError
-
-                    raise StaleJobOwnershipError(
-                        f"stale mention write rejected for meeting {mention.meeting_id}: "
-                        f"mention revision {mention.source_revision} < current source revision {current_rev}"
-                    )
+            _guard_derived_revision(connection, mention.meeting_id, mention.source_revision, kind="mention")
             connection.execute(
                 "INSERT INTO entity_mentions(mention_id, meeting_id, entity_id, entity_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(mention_id) DO UPDATE SET meeting_id=excluded.meeting_id, entity_id=excluded.entity_id, entity_type=excluded.entity_type, payload=excluded.payload, source_revision=excluded.source_revision",
@@ -223,6 +236,24 @@ class SQLiteMentionRepository(AbstractMentionRepository):
         ).fetchall()
         return [EntityMention.model_validate_json(row[0]) for row in rows]
 
+    def list_current_by_meeting_id(
+        self,
+        meeting_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[EntityMention]:
+        from app.repositories.mention_repository import filter_current_mentions
+
+        return filter_current_mentions(self.list_by_meeting_id(meeting_id), current_revision_lookup)
+
+    def list_current_by_entity_id(
+        self,
+        entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[EntityMention]:
+        from app.repositories.mention_repository import filter_current_mentions
+
+        return filter_current_mentions(self.list_by_entity_id(entity_id), current_revision_lookup)
+
     def update(self, mention: EntityMention) -> None:
         self.create(mention)
 
@@ -233,19 +264,7 @@ class SQLiteDependencyRepository(AbstractDependencyRepository):
 
     def save(self, dependency: ExplicitDependency) -> None:
         with self._store.transaction() as connection:
-            meeting_row = connection.execute(
-                "SELECT source_revision FROM meetings WHERE meeting_id = ?",
-                (dependency.meeting_id,),
-            ).fetchone()
-            if meeting_row is not None:
-                current_rev = int(meeting_row["source_revision"] or 1)
-                if int(dependency.source_revision) < current_rev:
-                    from app.repositories.background_job_repository import StaleJobOwnershipError
-
-                    raise StaleJobOwnershipError(
-                        f"stale dependency write rejected for meeting {dependency.meeting_id}: "
-                        f"dependency revision {dependency.source_revision} < current source revision {current_rev}"
-                    )
+            _guard_derived_revision(connection, dependency.meeting_id, dependency.source_revision, kind="dependency")
             connection.execute(
                 "INSERT INTO dependencies(dependency_id, source_entity_id, target_entity_id, meeting_id, relationship_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(dependency_id) DO UPDATE SET source_entity_id=excluded.source_entity_id, target_entity_id=excluded.target_entity_id, meeting_id=excluded.meeting_id, relationship_type=excluded.relationship_type, payload=excluded.payload, source_revision=excluded.source_revision",
@@ -287,3 +306,38 @@ class SQLiteDependencyRepository(AbstractDependencyRepository):
 
     def list_all(self) -> list[ExplicitDependency]:
         return self._list_where("1 = 1", ())
+
+    def list_current_by_entity_id(
+        self,
+        entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        from app.repositories.dependency_repository import filter_current_records
+
+        return filter_current_records(self.list_by_entity_id(entity_id), current_revision_lookup)
+
+    def list_current_by_source_entity_id(
+        self,
+        source_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        from app.repositories.dependency_repository import filter_current_records
+
+        return filter_current_records(self.list_by_source_entity_id(source_entity_id), current_revision_lookup)
+
+    def list_current_by_target_entity_id(
+        self,
+        target_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        from app.repositories.dependency_repository import filter_current_records
+
+        return filter_current_records(self.list_by_target_entity_id(target_entity_id), current_revision_lookup)
+
+    def list_current_all(
+        self,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        from app.repositories.dependency_repository import filter_current_records
+
+        return filter_current_records(self.list_all(), current_revision_lookup)

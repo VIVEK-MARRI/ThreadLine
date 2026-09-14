@@ -36,6 +36,29 @@ from __future__ import annotations
 from typing import Optional
 
 
+class RevisionMismatchError(Exception):
+    """A derived write did not target the authoritative source revision.
+
+    Revision-stamped derived data (extraction results, entity mentions,
+    explicit dependencies, semantic records) may only be written against the
+    exact current source revision of the owning meeting.  Older revisions are
+    stale; newer revisions are fabrications that would masquerade as current.
+    """
+
+
+class StaleRevisionError(RevisionMismatchError):
+    """A write stamped with an older revision than the authoritative source."""
+
+
+class FutureRevisionError(RevisionMismatchError):
+    """A write stamped with a newer revision than the authoritative source.
+
+    A future-revision write is the mirror image of a stale write: it claims
+    derived state derived from a source revision that does not (yet) exist,
+    so it could silently masquerade as current until the source catches up.
+    """
+
+
 def parse_source_revision(processing_revision: Optional[str]) -> Optional[int]:
     """Extract the deterministic source revision from a processing revision.
 
@@ -160,8 +183,10 @@ def get_consistency_status(
         except Exception:
             derived_revision = None
 
-    # Current semantic evidence revision = max source_revision among semantic
-    # records attributable to this meeting.
+    # Current semantic evidence revision: only current when every
+    # meeting-attributed record agrees on the same source revision.
+    # Mixed revisions (e.g. rev 1 + rev 2) → semantic is NOT current:
+    # stale rev-1 records would masquerade as current alongside rev-2.
     semantic_revision: Optional[int] = None
     if semantic_repository is not None:
         try:
@@ -170,19 +195,11 @@ def get_consistency_status(
                 record_meeting = getattr(record, "meeting_id", None)
                 if record_meeting is not None and record_meeting != meeting_id:
                     continue
-                # Records without meeting attribution cannot prove currency for
-                # this meeting; only consider attributed records when any exist.
-                # Fall back to unattributed only if no attributed records exist
-                # (legacy data).  Handled below.
                 record_rev = getattr(record, "source_revision", None)
                 if record_rev is not None:
                     revisions.append(int(record_rev))
-            if not revisions:
-                # Legacy fallback: no meeting-attributed revisions; report None
-                # rather than masquerading unrelated records as current.
-                pass
-            else:
-                semantic_revision = max(revisions)
+            if revisions and len(set(revisions)) == 1:
+                semantic_revision = revisions[0]
         except (TypeError, ValueError, AttributeError):
             semantic_revision = None
 

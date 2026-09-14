@@ -57,6 +57,7 @@ from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrat
 from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
 from app.services.meeting_service import MeetingService
 from app.services.processing_consistency_service import (
+    FutureRevisionError,
     get_consistency_status,
     parse_source_revision,
     processing_revision_for,
@@ -103,17 +104,23 @@ class _MeetingEvidenceSource:
         return []
 
 
-def _sqlite_stack(tmp_path, name="source.db"):
+def _sqlite_stack(tmp_path, name="source.db", clock=None):
     store = SQLiteSourceStore(tmp_path / name)
     meetings = SQLiteMeetingRepository(store)
     extractions = SQLiteExtractionRepository(store)
     entities = SQLiteEntityRepository(store)
     mentions = SQLiteMentionRepository(store)
     dependencies = SQLiteDependencyRepository(store)
-    jobs = SQLiteBackgroundJobRepository(store)
+    jobs = SQLiteBackgroundJobRepository(store, clock=clock)
     scheduler = BackgroundJobScheduler(jobs, max_attempts=3)
     semantic_repo = JsonFileSemanticIndexRepository(tmp_path / "semantic.json")
-    semantic = SemanticIndexingService(FakeEmbeddingProvider(), semantic_repo, "fake", "1.0")
+    def _current_rev(meeting_id):
+        m = meetings.get_by_id(meeting_id) if meeting_id is not None else None
+        return int(getattr(m, "source_revision", 1) or 1) if m is not None else None
+    semantic = SemanticIndexingService(
+        FakeEmbeddingProvider(), semantic_repo, "fake", "1.0",
+        current_revision_lookup=_current_rev,
+    )
     scoring = CandidateScoringService(mentions, entities, LexicalCandidateGenerator(), LexicalCandidateScorer())
     resolution = ResolutionService(mentions, entities, scoring, ThresholdResolutionPolicy())
     dep_resolution = DependencyResolutionService(entities, mentions, dependencies)
@@ -328,9 +335,8 @@ def test_consistency_invariant_exposes_incomplete_state(tmp_path):
     assert status["processing_complete"] is False
     # A failed revision must not silently become current: fail the job.
     job_id = f"MEETING_PROCESSING:m-cons:{processing_revision_for(1)}"
-    t_fail = datetime.now(timezone.utc)
-    claimed = stack["jobs"].claim(job_id, "w1", t_fail, 60)
-    stack["jobs"].transition(claimed.job_id, BackgroundJobStatus.FAILED, t_fail, owner_id="w1",
+    claimed = stack["jobs"].claim(job_id, "w1", 60)
+    stack["jobs"].transition(claimed.job_id, BackgroundJobStatus.FAILED, owner_id="w1",
                              last_error="boom", error_type="PERMANENT")
     status2 = get_consistency_status(
         "m-cons", meeting_repository=stack["meetings"], job_repository=stack["jobs"],
@@ -417,34 +423,36 @@ def test_observation_uses_shared_scoring_policy_not_substring_identity(tmp_path)
 # ---------------------------------------------------------------------------
 
 def test_stale_worker_cannot_commit_any_durable_state(tmp_path):
+    from tests._clock_utils import MutableClock as _MC
     stack = _sqlite_stack(tmp_path)
     _ingest(stack, "m-stale", transcript="Alpha depends on Beta.")
     EntityService(stack["entities"], stack["mentions"]).create_entity(EntityType.ISSUE, "Alpha")
     EntityService(stack["entities"], stack["mentions"]).create_entity(EntityType.ISSUE, "Beta")
     job_id = f"MEETING_PROCESSING:m-stale:{processing_revision_for(1)}"
-    jobs_a = SQLiteBackgroundJobRepository(SQLiteSourceStore(tmp_path / "source.db"))
-    jobs_b = SQLiteBackgroundJobRepository(SQLiteSourceStore(tmp_path / "source.db"))
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    jobs_a.claim(job_id, "worker-a", now, lease_seconds=10)
+    clock = _MC(datetime(2026, 1, 1, tzinfo=timezone.utc))
+    database = tmp_path / "source.db"
+    jobs_a = SQLiteBackgroundJobRepository(SQLiteSourceStore(database), clock)
+    jobs_b = SQLiteBackgroundJobRepository(SQLiteSourceStore(database), clock)
+    jobs_a.claim(job_id, "worker-a", lease_seconds=10)
     # Lease expires; worker B recovers and claims the same processing revision.
-    jobs_b.recover_stale(now + timedelta(seconds=11))
-    claimed_b = jobs_b.claim(job_id, "worker-b", now + timedelta(seconds=11), lease_seconds=60)
+    clock.advance(seconds=11)
+    jobs_b.recover_stale()
+    claimed_b = jobs_b.claim(job_id, "worker-b", lease_seconds=60)
     assert claimed_b is not None
 
     def assert_owned_a():
         current = jobs_a.get(job_id)
-        t = now + timedelta(seconds=12)
         if (current is None or current.status.value != "RUNNING" or current.worker_id != "worker-a"
-                or current.lease_until is None or current.lease_until <= t
+                or current.lease_until is None or current.lease_until <= clock()
                 or current.processing_revision != jobs_a.get(job_id).processing_revision):
             # Mirror production predicate: worker-a no longer owns the job.
             raise StaleJobOwnershipError("worker-a stale")
 
     # Stale job checkpoint + stale terminal transition are rejected.
     with pytest.raises(StaleJobOwnershipError):
-        jobs_a.checkpoint(job_id, "EXTRACTED", worker_id="worker-a", now=now + timedelta(seconds=12))
+        jobs_a.checkpoint(job_id, "EXTRACTED", worker_id="worker-a")
     with pytest.raises(StaleJobOwnershipError):
-        jobs_a.transition(job_id, BackgroundJobStatus.SUCCEEDED, now + timedelta(seconds=12), owner_id="worker-a")
+        jobs_a.transition(job_id, BackgroundJobStatus.SUCCEEDED, owner_id="worker-a")
 
     # Stale derived/semantic writes are rejected via propagated ownership checks.
     # First create durable extraction via the authoritative path (no stale guard).
@@ -470,8 +478,11 @@ def test_stale_worker_cannot_commit_any_durable_state(tmp_path):
     with pytest.raises(StaleJobOwnershipError):
         stack["orchestrator"].index_semantic_evidence("m-stale")
 
-    # Durable revision compare-and-swap: revision N cannot overwrite N+1 even
-    # without an ownership checker.
+    # Durable revision compare-and-swap (hardened, P6): neither stale nor
+    # future revisions may be stamped against the authoritative current source
+    # revision.  The old behavior allowed a future rev-2 write against a
+    # meeting still at rev 1, letting a fabricated revision masquerade as
+    # current until the source caught up; that write is now rejected.
     stack["orchestrator"].set_ownership_checker(None)
     stack["semantic"].set_ownership_checker(None)
     item = EvidenceItem(
@@ -479,17 +490,26 @@ def test_stale_worker_cannot_commit_any_durable_state(tmp_path):
         entity_id="ent-1", meeting_id="m-stale",
         summary="new evidence", source_reference="m-stale",
     )
-    stack["semantic"].index_evidence(item, source_revision=2, meeting_id="m-stale")
-    # Same evidence_id with older revision but same representation would reuse;
-    # use a changed summary so a write is attempted, then expect rejection.
     item_old = item.model_copy(update={"summary": "older evidence text"})
+    # Future write: rev 2 targets a meeting whose authoritative source
+    # revision is still 1 → rejected as a fabrication.
+    with pytest.raises(FutureRevisionError):
+        stack["semantic"].index_evidence(item, source_revision=2, meeting_id="m-stale")
+    # Advance the meeting to rev 2 (authoritative).  A rev-1 write is now
+    # stale and rejected by the durable compare-and-swap even with no
+    # ownership checker.
+    _current_meeting = stack["meetings"].get_by_id("m-stale")
+    stack["meetings"].save(_current_meeting.model_copy(update={"source_revision": 2}))
     with pytest.raises(StaleJobOwnershipError):
         stack["semantic"].index_evidence(item_old, source_revision=1, meeting_id="m-stale")
-    # Newer revision still wins.
+    # Once the authoritative source actually reaches rev 2, the current write
+    # succeeds and is verifiably current — revision 2 never masquerades as 1.
+    indexed = stack["semantic"].index_evidence(item, source_revision=2, meeting_id="m-stale")
+    assert indexed.source_revision == 2
     assert stack["semantic_repo"].get_by_composite_key("e-stale-guard", "fake", "1.0").source_revision == 2
 
     # Authoritative worker B can still make progress.
-    jobs_b.checkpoint(job_id, "EXTRACTED", worker_id="worker-b", now=now + timedelta(seconds=12))
+    jobs_b.checkpoint(job_id, "EXTRACTED", worker_id="worker-b")
     assert jobs_b.get(job_id).stage == "EXTRACTED"
 
 

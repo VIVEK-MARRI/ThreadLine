@@ -242,12 +242,11 @@ def test_real_process_restart_recovery(tmp_path):
         job_id = jobs[0]["job_id"]
         # Real atomic claim via the production repository (correct ISO lease
         # format, same semantics as a PROCESS 1 worker claiming the job).
-        from datetime import datetime as _dt, timezone as _tz
         from app.persistence.sqlite_store import SQLiteSourceStore as _Store
         from app.repositories.background_job_repository import SQLiteBackgroundJobRepository as _Repo
         _store = _Store(db_path)
         try:
-            _claimed = _Repo(_store).claim(job_id, "process-1-worker", _dt.now(_tz.utc), lease_seconds=2)
+            _claimed = _Repo(_store).claim(job_id, "process-1-worker", lease_seconds=2)
             assert _claimed is not None and _claimed.status.value == "RUNNING"
         finally:
             try:

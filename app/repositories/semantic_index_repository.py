@@ -8,18 +8,98 @@ Pattern matches existing repository conventions in ThreadLine.
 
 from abc import ABC, abstractmethod
 import json
+import logging
 import os
+import sys
 from pathlib import Path
 from threading import RLock
 from typing import Optional
 
 from app.models.semantic_index import SemanticIndexRecord
 
+logger = logging.getLogger(__name__)
+
 
 def _similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
     return max(0.0, min(1.0, sum(a * b for a, b in zip(vec_a, vec_b))))
+
+
+# ---------------------------------------------------------------------------
+# OS-level file locking for cross-process JSON index safety
+# ---------------------------------------------------------------------------
+
+class _FileLock:
+    """Cross-platform OS-level file lock for multi-process semantic index safety.
+
+    Uses ``msvcrt`` on Windows and ``fcntl`` on Unix.  The lock is held on a
+    sidecar ``<path>.lock`` file and released on unlock or file-descriptor close
+    (including unexpected process termination).  When OS-level locking is
+    unavailable (platform missing ``msvcrt``/``fcntl``), the context manager
+    silently falls back to no-op so callers can still rely on in-process
+    ``threading.RLock`` for single-process thread safety.
+
+    Usage::
+
+        with _FileLock(lock_path):
+            # protected region — OS-level exclusive lock held
+    """
+
+    def __init__(self, lock_path: str | Path) -> None:
+        self._path = Path(lock_path)
+        self._fd = None
+
+    def __enter__(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._fd = self._path.open("a+b")
+        except OSError as exc:
+            logger.warning(
+                "OS-level file locking unavailable (could not open %s): %s",
+                self._path,
+                exc,
+            )
+            self._fd = None
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                # msvcrt.locking only locks bytes that already exist within
+                # the file; seed a single byte so an empty lock file works.
+                self._fd.seek(0, 2)
+                if self._fd.tell() == 0:
+                    self._fd.write(b"\x00")
+                    self._fd.flush()
+                self._fd.seek(0, 0)
+                msvcrt.locking(self._fd.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError, PermissionError) as exc:
+            logger.warning(
+                "OS-level file locking unavailable for %s: %s",
+                self._path,
+                exc,
+            )
+            if self._fd is not None:
+                self._fd.close()
+                self._fd = None
+
+    def __exit__(self, *exc_info) -> None:
+        if self._fd is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                self._fd.seek(0, 0)
+                msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fd.close()
+            self._fd = None
 
 
 class AbstractSemanticIndexRepository(ABC):
@@ -348,8 +428,12 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._lock = RLock()
+        self._file_lock = _FileLock(self._path.with_suffix(self._path.suffix + ".lock"))
         self._records: dict[tuple[str, str, str], SemanticIndexRecord] = {}
-        self._load()
+        # Construct with the same degradation policy as every read: a missing
+        # or corrupt durable document becomes an empty snapshot instead of
+        # crashing an otherwise-read-only caller (P11).
+        self._refresh()
 
     @staticmethod
     def _key(record: SemanticIndexRecord) -> tuple[str, str, str]:
@@ -361,14 +445,32 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._records = {}
             return
         with self._path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if not isinstance(payload, list):
             raise ValueError("semantic index file must contain a JSON list")
+        fresh: dict[tuple[str, str, str], SemanticIndexRecord] = {}
         for item in payload:
             record = SemanticIndexRecord.model_validate(item)
-            self._records[self._key(record)] = record
+            fresh[self._key(record)] = record
+        self._records = fresh
+
+    def _refresh(self) -> None:
+        """Re-read the durable JSON document into the in-memory snapshot.
+
+        Called under the OS file lock so every operation observes the latest
+        committed state committed by any process — not a stale per-process
+        snapshot.  Missing/corrupt files degrade to an empty snapshot rather
+        than crashing a read-only caller; malformed JSON (a partial write from
+        a non-cooperating process, or hand-editing) is treated as an empty
+        index to favour availability over a permanent error.
+        """
+        try:
+            self._load()
+        except (json.JSONDecodeError, OSError, ValueError):
+            self._records = {}
 
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -396,19 +498,25 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         embedding_model: str,
         representation_version: str,
     ) -> Optional[SemanticIndexRecord]:
-        with self._lock:
-            return self._records.get((evidence_id, embedding_model, representation_version))
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                return self._records.get((evidence_id, embedding_model, representation_version))
 
     def get_by_evidence_id(self, evidence_id: str) -> list[SemanticIndexRecord]:
-        with self._lock:
-            records = [record for record in self._records.values() if record.evidence_id == evidence_id]
-            return sorted(records, key=lambda item: (item.embedding_model, item.representation_version))
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                records = [record for record in self._records.values() if record.evidence_id == evidence_id]
+                return sorted(records, key=lambda item: (item.embedding_model, item.representation_version))
 
     def upsert(self, record: SemanticIndexRecord) -> SemanticIndexRecord:
-        with self._lock:
-            self._records[self._key(record)] = record
-            self._persist()
-            return record
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                self._records[self._key(record)] = record
+                self._persist()
+                return record
 
     def delete(
         self,
@@ -416,22 +524,26 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         embedding_model: str,
         representation_version: str,
     ) -> bool:
-        with self._lock:
-            key = (evidence_id, embedding_model, representation_version)
-            if key not in self._records:
-                return False
-            del self._records[key]
-            self._persist()
-            return True
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                key = (evidence_id, embedding_model, representation_version)
+                if key not in self._records:
+                    return False
+                del self._records[key]
+                self._persist()
+                return True
 
     def delete_by_evidence_id(self, evidence_id: str) -> int:
-        with self._lock:
-            keys = [key for key in self._records if key[0] == evidence_id]
-            for key in keys:
-                del self._records[key]
-            if keys:
-                self._persist()
-            return len(keys)
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                keys = [key for key in self._records if key[0] == evidence_id]
+                for key in keys:
+                    del self._records[key]
+                if keys:
+                    self._persist()
+                return len(keys)
 
     def exists(
         self,
@@ -439,32 +551,42 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         embedding_model: str,
         representation_version: str,
     ) -> bool:
-        with self._lock:
-            return (evidence_id, embedding_model, representation_version) in self._records
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                return (evidence_id, embedding_model, representation_version) in self._records
 
     def list_by_model(self, embedding_model: str) -> list[SemanticIndexRecord]:
-        with self._lock:
-            records = [record for record in self._records.values() if record.embedding_model == embedding_model]
-            return sorted(records, key=lambda item: (item.evidence_id, item.representation_version))
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                records = [record for record in self._records.values() if record.embedding_model == embedding_model]
+                return sorted(records, key=lambda item: (item.evidence_id, item.representation_version))
 
     def list_all(self) -> list[SemanticIndexRecord]:
-        with self._lock:
-            return sorted(
-                self._records.values(),
-                key=lambda item: (item.embedding_model, item.evidence_id, item.representation_version),
-            )
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                return sorted(
+                    self._records.values(),
+                    key=lambda item: (item.embedding_model, item.evidence_id, item.representation_version),
+                )
 
     def count(self) -> int:
-        with self._lock:
-            return len(self._records)
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                return len(self._records)
 
     def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity):
-        with self._lock:
-            matches = []
-            for record in self._records.values():
-                if record.embedding_model != embedding_model or record.representation_version != representation_version:
-                    continue
-                score = _similarity(query_embedding, record.embedding)
-                if score >= min_similarity:
-                    matches.append((record, score))
-            return sorted(matches, key=lambda item: (-item[1], item[0].evidence_id))[:top_k]
+        with self._file_lock:
+            with self._lock:
+                self._refresh()
+                matches = []
+                for record in self._records.values():
+                    if record.embedding_model != embedding_model or record.representation_version != representation_version:
+                        continue
+                    score = _similarity(query_embedding, record.embedding)
+                    if score >= min_similarity:
+                        matches.append((record, score))
+                return sorted(matches, key=lambda item: (-item[1], item[0].evidence_id))[:top_k]

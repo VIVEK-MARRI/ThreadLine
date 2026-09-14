@@ -13,10 +13,43 @@ the in-memory implementation; a database backend would use appropriate indices.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Callable, Optional
 
 from app.models.dependency import ExplicitDependency
 from app.models.relationships import RelationshipType
+
+
+def filter_current_records(
+    deps: list[ExplicitDependency],
+    current_revision_lookup: Optional[Callable[[str], Optional[int]]],
+) -> list[ExplicitDependency]:
+    """Keep only dependency records that provably target the current
+    authoritative source revision of their owning meeting.
+
+    ``current_revision_lookup`` maps a meeting_id to its current source
+    revision (None when unknown).  When the lookup is None no filtering is
+    applied (legacy behavior for callers without revision wiring).  A record
+    without meeting attribution or a stamped source revision can never prove
+    currency and is excluded; a record whose stamped revision differs from
+    the authoritative current revision (stale OR future) is excluded so a
+    past/future revision never masquerades as current.
+    """
+    if current_revision_lookup is None:
+        return deps
+    result: list[ExplicitDependency] = []
+    for dep in deps:
+        if dep.meeting_id is None or dep.source_revision is None:
+            continue
+        current = current_revision_lookup(dep.meeting_id)
+        if current is None:
+            continue
+        try:
+            if int(dep.source_revision) != int(current):
+                continue
+        except (TypeError, ValueError):
+            continue
+        result.append(dep)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +109,57 @@ class AbstractDependencyRepository(ABC):
     @abstractmethod
     def list_all(self) -> list[ExplicitDependency]:
         """Return all stored dependency records."""
+        ...
+
+    @abstractmethod
+    def list_current_by_entity_id(
+        self,
+        entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        """Return current-revision records where entity_id is source OR target.
+
+        See filter_current_records for currency semantics.  Without a lookup
+        this behaves like list_by_entity_id.
+        """
+        ...
+
+    @abstractmethod
+    def list_current_by_source_entity_id(
+        self,
+        source_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        """Return current-revision records where the given entity is the source.
+
+        See filter_current_records for currency semantics.  Without a lookup
+        this behaves like list_by_source_entity_id.
+        """
+        ...
+
+    @abstractmethod
+    def list_current_by_target_entity_id(
+        self,
+        target_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        """Return current-revision records where the given entity is the target.
+
+        See filter_current_records for currency semantics.  Without a lookup
+        this behaves like list_by_target_entity_id.
+        """
+        ...
+
+    @abstractmethod
+    def list_current_all(
+        self,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        """Return all current-revision dependency records.
+
+        See filter_current_records for currency semantics.  Without a lookup
+        this behaves like list_all.
+        """
         ...
 
 
@@ -141,3 +225,36 @@ class InMemoryDependencyRepository(AbstractDependencyRepository):
     def list_all(self) -> list[ExplicitDependency]:
         """Return all stored records."""
         return list(self._store.values())
+
+    def list_current_by_entity_id(
+        self,
+        entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        return filter_current_records(
+            self.list_by_entity_id(entity_id), current_revision_lookup
+        )
+
+    def list_current_by_source_entity_id(
+        self,
+        source_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        return filter_current_records(
+            self.list_by_source_entity_id(source_entity_id), current_revision_lookup
+        )
+
+    def list_current_by_target_entity_id(
+        self,
+        target_entity_id: str,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        return filter_current_records(
+            self.list_by_target_entity_id(target_entity_id), current_revision_lookup
+        )
+
+    def list_current_all(
+        self,
+        current_revision_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    ) -> list[ExplicitDependency]:
+        return filter_current_records(self.list_all(), current_revision_lookup)

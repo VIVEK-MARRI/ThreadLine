@@ -38,6 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 
 from app.api.entities import (
+    _build_current_revision_lookup,
     _entity_repository,
     _mention_repository,
     _dependency_repository,
@@ -80,6 +81,7 @@ def get_organisation_change_intelligence_service() -> OrganisationChangeIntellig
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
         dependency_repo=_dependency_repository,
+        current_revision_lookup=_build_current_revision_lookup(),
     )
 
 

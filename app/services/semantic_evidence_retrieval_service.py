@@ -232,12 +232,21 @@ class SemanticEvidenceRetrievalService:
         query: str,
         source_lookup,
         top_k: int = 5,
+        current_revision_lookup=None,
     ) -> list[SemanticEvidenceMatch]:
         """Search the full active persisted corpus and rehydrate source items.
 
         ``source_lookup`` must return the authoritative EvidenceItem for an
         evidence ID, or None when the source item no longer exists. Stale
         records are excluded without indexing or mutating any repository.
+
+        ``current_revision_lookup`` is optional; when provided it maps a
+        meeting_id to the meeting's authoritative current source revision.
+        Only records whose attribution provably matches the current source
+        revision are returned: records with no attribution, or whose stored
+        revision differs from the authoritative current revision (stale or
+        future), are excluded so a past/future revision never masquerades as
+        current.  When omitted, no current-revision filtering is applied.
         """
         if not query or not query.strip():
             raise ValueError("query must not be empty")
@@ -263,8 +272,32 @@ class SemanticEvidenceRetrievalService:
             )
             if expected_hash != record.representation_hash:
                 continue
+            if current_revision_lookup is not None and not self._is_current_record(
+                record, evidence, current_revision_lookup
+            ):
+                continue
             matches.append(SemanticEvidenceMatch(record.evidence_id, score, evidence))
         return sorted(matches, key=lambda item: (-item.semantic_similarity_score, item.evidence_id))[:top_k]
+
+    @staticmethod
+    def _is_current_record(record, evidence, current_revision_lookup) -> bool:
+        """Return True only when a semantic record provably targets the
+        current authoritative source revision of its owning meeting.
+
+        A record without meeting attribution, or whose stored source_revision
+        differs from the authoritative current revision, is NOT current.
+        """
+        meeting_id = getattr(record, "meeting_id", None)
+        if meeting_id is None:
+            meeting_id = getattr(evidence, "meeting_id", None)
+        record_rev = getattr(record, "source_revision", None)
+        if meeting_id is None or record_rev is None:
+            return False
+        try:
+            current_rev = current_revision_lookup(meeting_id)
+            return current_rev is not None and int(record_rev) == int(current_rev)
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _make_evidence_representation(item: EvidenceItem) -> str:

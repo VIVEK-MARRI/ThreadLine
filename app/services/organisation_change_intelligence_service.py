@@ -235,10 +235,15 @@ class OrganisationChangeIntelligenceService:
         interpreter: AbstractStateInterpreter,
         policy: AbstractTemporalStatePolicy,
         dependency_repo: Optional[AbstractDependencyRepository] = None,
+        current_revision_lookup=None,
     ) -> None:
         self._entity_repo = entity_repo
         self._meeting_repo = meeting_repo  # stored for NEW_DEPENDENCY timestamp resolution
         self._dependency_repo = dependency_repo
+        # Optional callable mapping meeting_id -> current source revision.  When
+        # provided, only current-revision dependencies/mentions shape detected
+        # changes; staleness in revision-stamped durable state is disregarded.
+        self._current_revision_lookup = current_revision_lookup
 
         # Compose existing services (read-only, stateless).
         self._insight_service = InsightService(
@@ -266,6 +271,7 @@ class OrganisationChangeIntelligenceService:
             entity_repo=entity_repo,
             mention_repo=mention_repo,
             dependency_repo=dependency_repo,
+            current_revision_lookup=current_revision_lookup,
         )
 
         if dependency_repo is not None:
@@ -273,6 +279,7 @@ class OrganisationChangeIntelligenceService:
                 DependencyGraphService(
                     dependency_repo=dependency_repo,
                     entity_repo=entity_repo,
+                    current_revision_lookup=current_revision_lookup,
                 )
             )
         else:
@@ -771,7 +778,9 @@ class OrganisationChangeIntelligenceService:
         if self._dependency_repo is None:
             return
 
-        deps = self._dependency_repo.list_by_source_entity_id(entity_id)
+        deps = self._dependency_repo.list_current_by_source_entity_id(
+            entity_id, self._current_revision_lookup
+        )
         for dep in deps:
             # Skip if the target entity does not exist.
             if self._entity_repo.get_by_id(dep.target_entity_id) is None:

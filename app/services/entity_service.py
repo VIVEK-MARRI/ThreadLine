@@ -246,13 +246,22 @@ class EntityService:
             status == ResolutionStatus.RESOLVED
             and self._dependency_resolution_service is not None
         ):
+            from app.repositories.background_job_repository import StaleJobOwnershipError
+
             try:
                 self._dependency_resolution_service.resolve_mention_dependencies(
                     mention.mention_id
                 )
+            except StaleJobOwnershipError:
+                # Stale worker / failed durable write: never swallow.  The
+                # caller must observe the stale-state signal so it can
+                # retry/clean up instead of recording false success.
+                raise
             except Exception:
                 # Dependency extraction must never block mention registration.
-                # Log the error but allow the mention to be returned.
+                # Log the error but allow the mention to be returned.  Only
+                # non-durable transient failures are absorbed here; durable
+                # revision errors are re-raised above.
                 logger.exception(
                     "EntityService: dependency resolution failed for mention '%s'; "
                     "mention is still stored and resolved.",

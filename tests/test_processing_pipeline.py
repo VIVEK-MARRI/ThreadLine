@@ -46,7 +46,7 @@ def test_completed_processing_stages_are_skipped_on_retry():
     repository = SQLiteBackgroundJobRepository(SQLiteSourceStore(":memory:"))
     scheduler = BackgroundJobScheduler(repository)
     job = scheduler.enqueue(BackgroundJobType.MEETING_PROCESSING, "m1")
-    repository.claim(job.job_id, "worker", datetime.now(timezone.utc), 60)
+    repository.claim(job.job_id, "worker", 60)
     repository.checkpoint(job.job_id, ProcessingStage.EXTRACTED.value)
     calls = []
     pipeline = MeetingProcessingService(

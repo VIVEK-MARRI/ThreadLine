@@ -6,9 +6,16 @@ import uuid
 from typing import Callable, Optional
 
 from app.models.background_job import BackgroundJob, BackgroundJobStatus, BackgroundJobType
-from app.repositories.background_job_repository import AbstractBackgroundJobRepository
+from app.repositories.background_job_repository import (
+    AbstractBackgroundJobRepository,
+    StaleJobOwnershipError,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _default_clock() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class TransientJobError(Exception):
@@ -58,11 +65,19 @@ class BackgroundJobScheduler:
         )
 
     def cancel(self, job_id: str, now: Optional[datetime] = None) -> BackgroundJob:
-        return self._repository.cancel(job_id, now or datetime.now(timezone.utc))
+        # `now` is accepted for backward compatibility but never drives the
+        # durable mutation: the repository owns the authoritative clock.
+        return self._repository.cancel(job_id)
 
 
 class BackgroundWorkerService:
-    """Poll and execute durable jobs without claiming work after shutdown."""
+    """Poll and execute durable jobs without claiming work after shutdown.
+
+    The worker carries its own `clock` for computing scheduling fields
+    (e.g. `next_retry_at`).  Durable lease validation is always performed by
+    the repository against *its* clock, so a stale snapshot can never extend
+    a lease or checkpoint a job after ownership expired.
+    """
 
     def __init__(
         self,
@@ -71,12 +86,14 @@ class BackgroundWorkerService:
         worker_id: Optional[str] = None,
         lease_seconds: int = 60,
         backoff_seconds: int = 1,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._repository = repository
         self._handlers = handlers
         self._worker_id = worker_id or str(uuid.uuid4())
         self._lease_seconds = lease_seconds
         self._backoff_seconds = backoff_seconds
+        self._clock = clock or _default_clock
         self._stopping = False
 
     @property
@@ -87,8 +104,8 @@ class BackgroundWorkerService:
         """Stop future claims; an already running handler is not cancelled blindly."""
         self._stopping = True
 
-    def recover(self, now: Optional[datetime] = None) -> list[BackgroundJob]:
-        recovered = self._repository.recover_stale(now or datetime.now(timezone.utc))
+    def recover(self) -> list[BackgroundJob]:
+        recovered = self._repository.recover_stale()
         for job in recovered:
             logger.info("job_recovered job_id=%s job_type=%s", job.job_id, job.job_type.value)
         return recovered
@@ -96,30 +113,57 @@ class BackgroundWorkerService:
     def run_once(self, now: Optional[datetime] = None) -> Optional[BackgroundJob]:
         if self._stopping:
             return None
-        current = now or datetime.now(timezone.utc)
-        self.recover(current)
+        cutoff = now or self._clock()
+        self.recover()
         candidates = [
             job for job in self._repository.list()
             if job.status in {BackgroundJobStatus.PENDING, BackgroundJobStatus.RETRY_WAITING}
-            and (job.next_retry_at is None or job.next_retry_at <= current)
+            and (job.next_retry_at is None or job.next_retry_at <= cutoff)
         ]
         if not candidates:
             return None
         claimed = None
         for candidate in candidates:
-            claimed = self._repository.claim(candidate.job_id, self._worker_id, current, self._lease_seconds)
+            claimed = self._repository.claim(candidate.job_id, self._worker_id, self._lease_seconds)
             if claimed is not None:
                 break
         if claimed is None:
             return None
         logger.info("job_claimed job_id=%s attempt=%s", claimed.job_id, claimed.attempts)
         handler = self._handlers.get(claimed.job_type)
-        if handler is None:
-            return self._fail(claimed, current, PermanentJobError("unsupported job type"))
         try:
+            if handler is None:
+                return self._fail(claimed, PermanentJobError("unsupported job type"))
             handler(claimed)
+            try:
+                self._repository.checkpoint(claimed.job_id, "COMPLETED", self._worker_id)
+                result = self._repository.transition(
+                    claimed.job_id,
+                    BackgroundJobStatus.SUCCEEDED,
+                    owner_id=self._worker_id,
+                    last_error=None,
+                    error_type=None,
+                )
+            except StaleJobOwnershipError:
+                logger.warning(
+                    "job_lease_lost_on_completion job_id=%s worker_id=%s attempt=%s",
+                    claimed.job_id, self._worker_id, claimed.attempts,
+                )
+                return None
+            logger.info("job_completed job_id=%s attempt=%s", result.job_id, result.attempts)
+            return result
         except PermanentJobError as exc:
-            return self._fail(claimed, current, exc, "PERMANENT")
+            try:
+                return self._fail(claimed, exc, "PERMANENT")
+            except StaleJobOwnershipError:
+                logger.warning("job_lease_lost job_id=%s worker_id=%s", claimed.job_id, self._worker_id)
+                return None
+        except StaleJobOwnershipError as exc:
+            logger.warning(
+                "job_lease_lost job_id=%s worker_id=%s attempt=%s: %s",
+                claimed.job_id, self._worker_id, claimed.attempts, exc,
+            )
+            return None
         except Exception as exc:
             logger.exception(
                 "job_processing_error job_id=%s meeting_id=%s revision=%s "
@@ -131,32 +175,20 @@ class BackgroundWorkerService:
                 self._worker_id,
                 claimed.attempts,
             )
-            return self._retry_or_fail(claimed, current, exc)
-        self._repository.checkpoint(
-            claimed.job_id,
-            "COMPLETED",
-            self._worker_id,
-            current,
-        )
-        result = self._repository.transition(
-            claimed.job_id,
-            BackgroundJobStatus.SUCCEEDED,
-            current,
-            owner_id=self._worker_id,
-            last_error=None,
-            error_type=None,
-        )
-        logger.info("job_completed job_id=%s attempt=%s", result.job_id, result.attempts)
-        return result
+            try:
+                return self._retry_or_fail(claimed, exc)
+            except StaleJobOwnershipError:
+                logger.warning("job_lease_lost job_id=%s worker_id=%s", claimed.job_id, self._worker_id)
+                return None
 
-    def _retry_or_fail(self, job: BackgroundJob, now: datetime, exc: Exception) -> BackgroundJob:
+    def _retry_or_fail(self, job: BackgroundJob, exc: Exception) -> BackgroundJob:
         if job.attempts >= job.max_attempts:
-            return self._fail(job, now, exc, "TRANSIENT")
+            return self._fail(job, exc, "TRANSIENT")
         delay = self._backoff_seconds * (2 ** max(0, job.attempts - 1))
+        now = self._clock()
         result = self._repository.transition(
             job.job_id,
             BackgroundJobStatus.RETRY_WAITING,
-            now,
             owner_id=self._worker_id,
             next_retry_at=now + timedelta(seconds=delay),
             last_error=str(exc),
@@ -166,11 +198,10 @@ class BackgroundWorkerService:
         logger.warning("job_retry job_id=%s attempt=%s next_retry_at=%s", result.job_id, result.attempts, result.next_retry_at)
         return result
 
-    def _fail(self, job: BackgroundJob, now: datetime, exc: Exception, error_type: str = "PERMANENT") -> BackgroundJob:
+    def _fail(self, job: BackgroundJob, exc: Exception, error_type: str = "PERMANENT") -> BackgroundJob:
         result = self._repository.transition(
             job.job_id,
             BackgroundJobStatus.FAILED,
-            now,
             owner_id=self._worker_id,
             last_error=str(exc),
             error_type=error_type,
@@ -183,4 +214,4 @@ class BackgroundWorkerService:
         current = self._repository.get(job_id)
         if current is not None and current.status == BackgroundJobStatus.SUCCEEDED and current.stage == stage:
             return current
-        return self._repository.checkpoint(job_id, stage, self._worker_id, datetime.now(timezone.utc))
+        return self._repository.checkpoint(job_id, stage, self._worker_id)

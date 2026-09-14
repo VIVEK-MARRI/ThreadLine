@@ -20,15 +20,12 @@ forced.
 
 from __future__ import annotations
 
-import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
 from app.models.entity import EntityMention, EntityType, ResolutionStatus
-
-logger = logging.getLogger(__name__)
 
 
 def _window(transcript: str, start: int, end: int, before: int = 80, after: int = 120) -> str:
@@ -91,15 +88,12 @@ class EntityObservationService:
 
         existing = set()
         for mention in self._mentions.list_by_meeting_id(meeting_id):
-            try:
-                existing.add((
-                    mention.entity_type,
-                    _norm(mention.text),
-                    mention.source_text,
-                    int(getattr(mention, "source_revision", 1) or 1),
-                ))
-            except Exception:
-                continue
+            existing.add((
+                mention.entity_type,
+                _norm(mention.text),
+                mention.source_text,
+                int(getattr(mention, "source_revision", 1) or 1),
+            ))
 
         # Collect deterministic observation proposals: (entity_type, text, source_text)
         proposals: list[tuple[EntityType, str, str]] = []
@@ -121,10 +115,7 @@ class EntityObservationService:
         # 2. Known canonical entities / aliases verbatim in transcript.
         # Discovery only — identity is decided by the scoring policy below,
         # never by this substring scan alone.
-        try:
-            known_entities = self._entities.list_entities()
-        except Exception:
-            known_entities = []
+        known_entities = self._entities.list_entities()
         for entity in known_entities:
             representations = [entity.canonical_name, *list(entity.aliases or [])]
             for representation in representations:
@@ -147,10 +138,7 @@ class EntityObservationService:
 
         observed: list[EntityMention] = []
         for entity_type, text, source_text in proposals:
-            try:
-                norm_text = _norm(text)
-            except Exception:
-                norm_text = text
+            norm_text = _norm(text)
             key = (entity_type, norm_text, source_text, source_revision)
             if key in existing:
                 continue
@@ -171,39 +159,36 @@ class EntityObservationService:
 
             # Candidate generation → scoring → policy determines final state.
             # Never invents entities; never forces ambiguous matches.
-            try:
-                if resolution_service is not None:
-                    decision = resolution_service.resolve(mention.mention_id)
-                    refreshed = self._mentions.get_by_id(mention.mention_id)
-                    if refreshed is not None:
-                        mention = refreshed
-                else:
-                    assert scoring_service is not None and policy is not None
-                    _, scored = scoring_service.get_scored_candidates(mention.mention_id)
-                    decision = policy.decide(mention_id=mention.mention_id, scored_candidates=scored)
-                    if decision.outcome.value == "RESOLVED":
-                        candidate_ids = {sc.entity_id for sc in scored}
-                        if decision.selected_entity_id in candidate_ids:
-                            updated = mention.model_copy(update={
-                                "entity_id": decision.selected_entity_id,
-                                "resolution_status": ResolutionStatus.RESOLVED,
-                            })
-                            self._assert_owned()
-                            self._mentions.update(updated)
-                            mention = updated
-                    elif decision.outcome.value == "AMBIGUOUS":
+            if resolution_service is not None:
+                decision = resolution_service.resolve(mention.mention_id)
+                refreshed = self._mentions.get_by_id(mention.mention_id)
+                if refreshed is not None:
+                    mention = refreshed
+            else:
+                assert scoring_service is not None and policy is not None
+                _, scored = scoring_service.get_scored_candidates(mention.mention_id)
+                decision = policy.decide(mention_id=mention.mention_id, scored_candidates=scored)
+                if decision.outcome.value == "RESOLVED":
+                    candidate_ids = {sc.entity_id for sc in scored}
+                    if decision.selected_entity_id in candidate_ids:
                         updated = mention.model_copy(update={
-                            "entity_id": None,
-                            "resolution_status": ResolutionStatus.AMBIGUOUS,
+                            "entity_id": decision.selected_entity_id,
+                            "resolution_status": ResolutionStatus.RESOLVED,
                         })
                         self._assert_owned()
                         self._mentions.update(updated)
                         mention = updated
-                    else:
-                        # UNRESOLVED — leave as-is, entity_id stays None.
-                        pass
-            except Exception:
-                logger.exception("EntityObservationService: resolution failed for mention %s", mention.mention_id)
+                elif decision.outcome.value == "AMBIGUOUS":
+                    updated = mention.model_copy(update={
+                        "entity_id": None,
+                        "resolution_status": ResolutionStatus.AMBIGUOUS,
+                    })
+                    self._assert_owned()
+                    self._mentions.update(updated)
+                    mention = updated
+                else:
+                    # UNRESOLVED — leave as-is, entity_id stays None.
+                    pass
             observed.append(mention)
 
         return observed

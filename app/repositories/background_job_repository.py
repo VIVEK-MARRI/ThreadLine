@@ -1,11 +1,31 @@
-"""Durable and in-memory repositories for background job state."""
+"""Durable and in-memory repositories for background job state.
+
+Time source
+-----------
+All lease validation and timestamp persistence is driven by an injectable
+clock (`Callable[[], datetime]`), never by caller-supplied timestamps.  This
+closes the defect class where a worker passes a stale or pre-handler snapshot
+of `datetime.now()` into a durable mutation and thereby extends its lease,
+checkpoints a job after its lease expired, or freezes a job in RETRY_WAITING
+with an old `next_retry_at`.
+
+The repository is the single authority for "when is now":
+  - claim/checkpoint/transition/cancel/recover_stale always consult
+    `self._clock()` at call time.
+  - tests inject a controlled clock to simulate lease expiry and recovery
+    without threading fake timestamps through every method.
+"""
 
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.models.background_job import BackgroundJob, BackgroundJobStatus, BackgroundJobType
 from app.persistence.sqlite_store import SQLiteSourceStore
+
+
+def _default_clock() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 _ALLOWED_TRANSITIONS = {
@@ -60,24 +80,27 @@ class AbstractBackgroundJobRepository(ABC):
         ...
 
     @abstractmethod
-    def claim(self, job_id: str, worker_id: str, now: datetime, lease_seconds: int) -> Optional[BackgroundJob]:
-        """Atomically transition an eligible job to RUNNING."""
+    def claim(self, job_id: str, worker_id: str, lease_seconds: int) -> Optional[BackgroundJob]:
+        """Atomically transition an eligible job to RUNNING.
+
+        The lease window is computed from the repository clock at call time.
+        """
         ...
 
     @abstractmethod
-    def transition(self, job_id: str, status: BackgroundJobStatus, now: datetime, **fields) -> BackgroundJob:
+    def transition(self, job_id: str, status: BackgroundJobStatus, **fields) -> BackgroundJob:
         ...
 
     @abstractmethod
-    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None) -> BackgroundJob:
         ...
 
     @abstractmethod
-    def recover_stale(self, now: datetime) -> list[BackgroundJob]:
+    def recover_stale(self) -> list[BackgroundJob]:
         ...
 
     @abstractmethod
-    def cancel(self, job_id: str, now: datetime) -> BackgroundJob:
+    def cancel(self, job_id: str) -> BackgroundJob:
         ...
 
     @abstractmethod
@@ -99,10 +122,11 @@ class AbstractBackgroundJobRepository(ABC):
 
 
 class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         from threading import RLock
         self._jobs: dict[str, BackgroundJob] = {}
         self._lock = RLock()
+        self._clock = clock or _default_clock
 
     def enqueue(self, job: BackgroundJob) -> BackgroundJob:
         with self._lock:
@@ -112,7 +136,8 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
         with self._lock:
             return self._jobs.get(job_id)
 
-    def claim(self, job_id: str, worker_id: str, now: datetime, lease_seconds: int) -> Optional[BackgroundJob]:
+    def claim(self, job_id: str, worker_id: str, lease_seconds: int) -> Optional[BackgroundJob]:
+        now = self._clock()
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job.status not in {BackgroundJobStatus.PENDING, BackgroundJobStatus.RETRY_WAITING}:
@@ -126,7 +151,8 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
             job.attempts += 1
             return job
 
-    def transition(self, job_id: str, status: BackgroundJobStatus, now: datetime, **fields) -> BackgroundJob:
+    def transition(self, job_id: str, status: BackgroundJobStatus, **fields) -> BackgroundJob:
+        now = self._clock()
         with self._lock:
             job = self._jobs[job_id]
             if status not in _ALLOWED_TRANSITIONS[job.status]:
@@ -148,23 +174,24 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
                 job.lease_until = None
             return job
 
-    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None) -> BackgroundJob:
+        now = self._clock()
         with self._lock:
             job = self._jobs[job_id]
             if _STAGE_ORDER.get(stage, -1) < _STAGE_ORDER.get(job.stage, -1):
                 raise InvalidJobTransition(f"checkpoint regression: {job.stage} -> {stage}")
-            timestamp = now or datetime.now(timezone.utc)
             if worker_id is not None and (
                 job.status != BackgroundJobStatus.RUNNING
                 or job.worker_id != worker_id
                 or job.lease_until is None
-                or job.lease_until <= timestamp
+                or job.lease_until <= now
             ):
                 raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
             job.stage = stage
             return job
 
-    def recover_stale(self, now: datetime) -> list[BackgroundJob]:
+    def recover_stale(self) -> list[BackgroundJob]:
+        now = self._clock()
         recovered = []
         with self._lock:
             for job in self._jobs.values():
@@ -180,8 +207,8 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
                     recovered.append(job)
         return recovered
 
-    def cancel(self, job_id: str, now: datetime) -> BackgroundJob:
-        return self.transition(job_id, BackgroundJobStatus.CANCELLED, now)
+    def cancel(self, job_id: str) -> BackgroundJob:
+        return self.transition(job_id, BackgroundJobStatus.CANCELLED)
 
     def list(self, status: Optional[BackgroundJobStatus] = None) -> list[BackgroundJob]:
         with self._lock:
@@ -192,8 +219,9 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
 
 
 class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
-    def __init__(self, store: SQLiteSourceStore) -> None:
+    def __init__(self, store: SQLiteSourceStore, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._store = store
+        self._clock = clock or _default_clock
 
     @staticmethod
     def _from_row(row) -> BackgroundJob:
@@ -226,7 +254,8 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
         row = self._store._connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job_id,)).fetchone()
         return self._from_row(row) if row else None
 
-    def claim(self, job_id: str, worker_id: str, now: datetime, lease_seconds: int) -> Optional[BackgroundJob]:
+    def claim(self, job_id: str, worker_id: str, lease_seconds: int) -> Optional[BackgroundJob]:
+        now = self._clock()
         with self._store.transaction() as connection:
             row = connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job_id,)).fetchone()
             if row is None or row["status"] not in {BackgroundJobStatus.PENDING.value, BackgroundJobStatus.RETRY_WAITING.value}:
@@ -245,7 +274,8 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
                 return None
             return self._from_row(connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job_id,)).fetchone())
 
-    def transition(self, job_id: str, status: BackgroundJobStatus, now: datetime, **fields) -> BackgroundJob:
+    def transition(self, job_id: str, status: BackgroundJobStatus, **fields) -> BackgroundJob:
+        now = self._clock()
         current = self.get(job_id)
         if current is None:
             raise KeyError(job_id)
@@ -281,8 +311,8 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
                 raise StaleJobOwnershipError(f"worker {owner} no longer owns job {job_id}") if owner else InvalidJobTransition("job state changed before transition")
         return self.get(job_id)
 
-    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None, now: Optional[datetime] = None) -> BackgroundJob:
-        timestamp = now or datetime.now(timezone.utc)
+    def checkpoint(self, job_id: str, stage: str, worker_id: Optional[str] = None) -> BackgroundJob:
+        now = self._clock()
         with self._store.transaction() as connection:
             row = connection.execute("SELECT stage FROM background_jobs WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
@@ -292,24 +322,25 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             updated = connection.execute(
                 """UPDATE background_jobs SET stage=? WHERE job_id=?
                    AND (? IS NULL OR (status=? AND worker_id=? AND lease_until IS NOT NULL AND lease_until>?))""",
-                (stage, job_id, worker_id, BackgroundJobStatus.RUNNING.value, worker_id, _iso(timestamp)),
+                (stage, job_id, worker_id, BackgroundJobStatus.RUNNING.value, worker_id, _iso(now)),
             )
             if updated.rowcount != 1:
                 raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
         return self.get(job_id)
 
-    def recover_stale(self, now: datetime) -> list[BackgroundJob]:
+    def recover_stale(self) -> list[BackgroundJob]:
+        now = self._clock()
         stale = [job for job in self.list(BackgroundJobStatus.RUNNING) if job.lease_until and job.lease_until <= now]
         recovered = []
         for job in stale:
             if job.attempts < job.max_attempts:
-                recovered.append(self.transition(job.job_id, BackgroundJobStatus.RETRY_WAITING, now, next_retry_at=now, worker_id=None))
+                recovered.append(self.transition(job.job_id, BackgroundJobStatus.RETRY_WAITING, next_retry_at=now, worker_id=None))
             else:
-                recovered.append(self.transition(job.job_id, BackgroundJobStatus.FAILED, now, last_error="lease expired", error_type="TRANSIENT"))
+                recovered.append(self.transition(job.job_id, BackgroundJobStatus.FAILED, last_error="lease expired", error_type="TRANSIENT"))
         return recovered
 
-    def cancel(self, job_id: str, now: datetime) -> BackgroundJob:
-        return self.transition(job_id, BackgroundJobStatus.CANCELLED, now)
+    def cancel(self, job_id: str) -> BackgroundJob:
+        return self.transition(job_id, BackgroundJobStatus.CANCELLED)
 
     def list(self, status: Optional[BackgroundJobStatus] = None) -> list[BackgroundJob]:
         if status is None:

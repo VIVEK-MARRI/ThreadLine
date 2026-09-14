@@ -355,6 +355,7 @@ def get_entity_relationship_service() -> EntityRelationshipService:
         entity_repo=_entity_repository,
         mention_repo=_mention_repository,
         dependency_repo=_dependency_repository,
+        current_revision_lookup=_build_current_revision_lookup(),
     )
 
 
@@ -363,7 +364,32 @@ def get_dependency_graph_service() -> DependencyGraphService:
     return DependencyGraphService(
         dependency_repo=_dependency_repository,
         entity_repo=_entity_repository,
+        current_revision_lookup=_build_current_revision_lookup(),
     )
+
+
+def _build_current_revision_lookup():
+    """Return an authoritative meeting source-revision lookup callable.
+
+    Callers (relationship / dependency graph / change-intelligence services)
+    use it to read only current-revision stamped state so a revision-N record
+    never shapes intelligence as current revision N+1.  Meeting repo access is
+    deferred to request time (avoid startup circular imports).
+    """
+    meeting_repo = _get_shared_meeting_repository()
+
+    def _lookup(meeting_id):
+        if meeting_id is None:
+            return None
+        meeting = meeting_repo.get_by_id(meeting_id)
+        if meeting is None:
+            return None
+        try:
+            return int(getattr(meeting, "source_revision", 1) or 1)
+        except (TypeError, ValueError):
+            return None
+
+    return _lookup
 
 
 def get_impact_analysis_service() -> ImpactAnalysisService:

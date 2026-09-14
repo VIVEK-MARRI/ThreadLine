@@ -65,10 +65,7 @@ class MeetingPipelineOrchestrator:
         ):
             setter = getattr(service, "set_ownership_checker", None)
             if callable(setter):
-                try:
-                    setter(checker)
-                except Exception:
-                    pass
+                setter(checker)
 
     def _assert_owned(self) -> None:
         if self._ownership_checker is not None:
@@ -77,10 +74,7 @@ class MeetingPipelineOrchestrator:
     def _current_source_revision(self, meeting_id: str) -> int | None:
         if self._meeting_repository is None:
             return None
-        try:
-            meeting = self._meeting_repository.get_by_id(meeting_id)
-        except Exception:
-            return None
+        meeting = self._meeting_repository.get_by_id(meeting_id)
         if meeting is None:
             return None
         try:
@@ -93,10 +87,7 @@ class MeetingPipelineOrchestrator:
         revision = self._current_source_revision(meeting_id)
         if revision is None:
             return mentions
-        # Prefer current-revision mentions; fall back to all when no
-        # revision-stamped mentions exist yet (legacy data).
-        current = [m for m in mentions if int(getattr(m, "source_revision", 1) or 1) == revision]
-        return current if current else mentions
+        return [m for m in mentions if int(getattr(m, "source_revision", 1) or 1) == revision]
 
     def resolve_meeting(self, meeting_id: str) -> None:
         self._require_extraction(meeting_id)

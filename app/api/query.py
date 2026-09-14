@@ -115,6 +115,11 @@ _semantic_indexing_service = SemanticIndexingService(
     repository=_semantic_repository,
     embedding_model_name=settings.active_embedding_model,
     representation_version=settings.active_representation_version,
+    current_revision_lookup=lambda meeting_id: (
+        int(getattr(_meeting_repository.get_by_id(meeting_id), "source_revision", 1) or 1)
+        if meeting_id is not None and _meeting_repository.get_by_id(meeting_id) is not None
+        else None
+    ),
 )
 
 
@@ -161,10 +166,23 @@ def get_natural_language_query_service(
         embedding_model_name=settings.active_embedding_model,
         representation_version=settings.active_representation_version,
     )
+
+    def _current_revision(meeting_id):
+        if meeting_id is None:
+            return None
+        meeting = _meeting_repository.get_by_id(meeting_id)
+        if meeting is None:
+            return None
+        try:
+            return int(getattr(meeting, "source_revision", 1) or 1)
+        except (TypeError, ValueError):
+            return None
+
     hybrid_service = HybridEvidenceRetrievalService(
         structured_service=retrieval_svc,
         semantic_service=semantic_service,
         semantic_corpus_provider=lambda current_time: retrieval_svc.build_semantic_corpus(current_time),
+        current_revision_lookup=_current_revision,
     )
     return NaturalLanguageQueryService(
         intent_svc=_intent_service,
