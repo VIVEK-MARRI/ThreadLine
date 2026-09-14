@@ -41,6 +41,27 @@ def _request(port: int, method: str, path: str, payload=None, timeout: int = 5):
         return response.status, data
 
 
+def _close_log_handle(process) -> None:
+    handle = getattr(process, "_e2e_log_handle", None)
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        try:
+            delattr(process, "_e2e_log_handle")
+        except Exception:
+            pass
+
+
+def _log_tail(tmp_path: Path, port: int, limit: int = 8000) -> str:
+    try:
+        text = (tmp_path / f"uvicorn-{port}.log").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return "<no subprocess log>"
+    return text[-limit:]
+
+
 def _start_app(tmp_path: Path, worker_enabled: bool, extra_env: dict | None = None):
     port = _free_port()
     environment = os.environ.copy()
@@ -57,13 +78,19 @@ def _start_app(tmp_path: Path, worker_enabled: bool, extra_env: dict | None = No
     })
     if extra_env:
         environment.update(extra_env)
+    # Never use stdout=PIPE without a reader: uvicorn access/startup logs plus
+    # the tight health/diagnostics polling loops can fill an undrained pipe
+    # buffer and stall the server under full-suite load.  A per-test log file
+    # preserves diagnostics without back-pressure on the subprocess.
+    log_handle = open(tmp_path / f"uvicorn-{port}.log", "ab")
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=os.getcwd(),
         env=environment,
-        stdout=subprocess.PIPE,
+        stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
+    process._e2e_log_handle = log_handle
     deadline = time.time() + 15
     last_error = None
     while time.time() < deadline:
@@ -73,7 +100,8 @@ def _start_app(tmp_path: Path, worker_enabled: bool, extra_env: dict | None = No
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if process.poll() is not None:
-                output = process.communicate(timeout=5)[0].decode(errors="replace")
+                _close_log_handle(process)
+                output = _log_tail(tmp_path, port)
                 raise AssertionError(f"subprocess exited early:\n{output}") from exc
             time.sleep(0.05)
     process.terminate()
@@ -81,7 +109,11 @@ def _start_app(tmp_path: Path, worker_enabled: bool, extra_env: dict | None = No
         process.wait(timeout=5)
     except Exception:
         process.kill()
-    raise AssertionError(f"ThreadLine subprocess did not become healthy: {last_error}")
+    _close_log_handle(process)
+    raise AssertionError(
+        f"ThreadLine subprocess did not become healthy: {last_error}\n"
+        f"{_log_tail(tmp_path, port)}"
+    )
 
 
 def _stop_app(process):
@@ -93,17 +125,37 @@ def _stop_app(process):
             process.kill()
         except Exception:
             pass
+    finally:
+        _close_log_handle(process)
 
 
 def _wait_for_succeeded(port: int, expected: int = 1, timeout: int = 20):
     deadline = time.time() + timeout
+    diagnostics = None
+    last_error: Exception | str | None = None
     while time.time() < deadline:
-        _, diagnostics = _request(port, "GET", "/health/diagnostics")
+        # A single slow/failed poll under load must not abort the wait: the
+        # deadline above (unchanged) still bounds the total wait, and the
+        # SUCCEEDED-count assertion below is unchanged.
+        try:
+            _, diagnostics = _request(port, "GET", "/health/diagnostics")
+        except Exception as exc:  # noqa: BLE001 - transient poll failure
+            last_error = exc
+            diagnostics = None
+            time.sleep(0.1)
+            continue
+        if not isinstance(diagnostics, dict):
+            last_error = f"non-JSON diagnostics payload: {diagnostics!r}"
+            diagnostics = None
+            time.sleep(0.1)
+            continue
         counts = diagnostics.get("background_job_counts", {})
         if counts.get("SUCCEEDED", 0) >= expected:
             return diagnostics
         time.sleep(0.1)
-    raise AssertionError(f"timed out waiting for {expected} SUCCEEDED jobs: {diagnostics}")
+    raise AssertionError(
+        f"timed out waiting for {expected} SUCCEEDED jobs: {diagnostics} (last poll error: {last_error!r})"
+    )
 
 
 def _sqlite_row_counts(db_path: Path) -> dict:
