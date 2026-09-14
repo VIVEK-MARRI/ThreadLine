@@ -1,0 +1,90 @@
+/* ------------------------------------------------------------------
+ * ThreadLine base styles: reset, page frame, typography defaults,
+ * focus visibility, reduced-motion respect. Component styles live in
+ * per-component CSS files that consume tokens.css variables only.
+ * ------------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--tl-paper);
+  color: var(--tl-ink);
+  font-family: var(--tl-font-sans);
+  font-size: var(--tl-text-body-size);
+  line-height: var(--tl-text-body-leading);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Visible, consistent keyboard focus everywhere. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  box-shadow: var(--tl-focus-ring);
+  border-radius: var(--tl-radius-sm);
+}
+
+/* Form elements inherit the product typeface. */
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Tabular numerals for data-dense readouts. */
+.tl-numeric {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Screen-reader-only utility (status text that must not be color-only, etc). */
+.tl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Respect users who prefer reduced motion: kill transitions/animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

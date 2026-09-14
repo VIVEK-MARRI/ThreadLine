@@ -1,0 +1,101 @@
+/* Auth screens: calm split composition. Flat navy panel, paper form.
+ * No gradients, no glass, no decoration. */
+
+.tl-auth-wrap {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--tl-space-xl);
+  padding: var(--tl-space-xl) var(--tl-space-lg);
+  background: var(--tl-paper);
+}
+
+.tl-auth-card {
+  width: 100%;
+  max-width: 26rem;
+  background: var(--tl-surface);
+  border: var(--tl-border);
+  border-radius: var(--tl-radius-lg);
+  padding: var(--tl-space-2xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-lg);
+  box-shadow: var(--tl-shadow-sm);
+}
+
+.tl-auth-card-wide {
+  max-width: 32rem;
+}
+
+.tl-auth-brand {
+  display: flex;
+  align-items: center;
+}
+
+.tl-auth-title {
+  font-size: var(--tl-text-title-size);
+  line-height: var(--tl-text-title-leading);
+  font-weight: var(--tl-text-title-weight);
+  letter-spacing: var(--tl-text-title-spacing);
+}
+
+.tl-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-lg);
+}
+
+.tl-auth-foot {
+  font-size: var(--tl-text-secondary-size);
+  color: var(--tl-ink-muted);
+  text-align: center;
+  max-width: 26rem;
+}
+
+.tl-auth-foot a,
+.tl-auth-card a {
+  color: var(--tl-primary-700);
+  font-weight: 600;
+}
+
+.tl-org-pick-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-space-sm);
+}
+
+.tl-org-pick {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--tl-space-md);
+  padding: var(--tl-space-md) var(--tl-space-lg);
+  background: var(--tl-surface);
+  border: var(--tl-border-strong);
+  border-radius: var(--tl-radius-md);
+  text-align: left;
+  transition:
+    border-color var(--tl-duration-fast) var(--tl-ease),
+    background-color var(--tl-duration-fast) var(--tl-ease);
+}
+
+.tl-org-pick:hover {
+  border-color: var(--tl-primary-600);
+  background: var(--tl-primary-50);
+}
+
+.tl-org-pick-name {
+  font-size: var(--tl-text-body-size);
+  font-weight: 650;
+}
+
+.tl-org-pick-meta {
+  display: flex;
+  gap: var(--tl-space-xs);
+  flex-shrink: 0;
+}

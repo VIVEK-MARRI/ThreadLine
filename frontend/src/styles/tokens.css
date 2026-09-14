@@ -1,0 +1,149 @@
+/* ------------------------------------------------------------------
+ * ThreadLine design tokens — the single source of truth for color,
+ * typography, spacing, radius, borders, and shadows.
+ *
+ * Identity: warm paper neutrals + deep navy primary + muted teal support.
+ * Light mode is the primary product experience. No gradients, no
+ * glassmorphism, no decorative color: every token has a job.
+ * ------------------------------------------------------------------ */
+
+:root {
+  /* ---- Neutral base (warm paper) ---- */
+  --tl-paper: #f7f4ee;
+  --tl-surface: #ffffff;
+  --tl-surface-sunken: #f1ede3;
+  --tl-ink: #211d16;
+  --tl-ink-secondary: #5c564a;
+  --tl-ink-muted: #8a8175;
+  --tl-ink-faint: #b3aa99;
+  --tl-line: #e4ddcd;
+  --tl-line-strong: #d3c9b2;
+
+  /* ---- Primary: deep navy family ---- */
+  --tl-primary-950: #101f33;
+  --tl-primary-900: #152a45;
+  --tl-primary-800: #1e3a5f;
+  --tl-primary-700: #274b77;
+  --tl-primary-600: #2f5d8f;
+  --tl-primary-100: #dce7f3;
+  --tl-primary-50: #eff4fa;
+  --tl-on-primary: #ffffff;
+
+  /* ---- Supporting: muted blue-teal family ---- */
+  --tl-teal-800: #1d5a4e;
+  --tl-teal-700: #22705f;
+  --tl-teal-600: #2a8570;
+  --tl-teal-100: #d9ebe4;
+  --tl-teal-50: #edf5f1;
+
+  /* ---- Semantic ---- */
+  --tl-success-ink: #2e6b45;
+  --tl-success-bg: #e2efe4;
+  --tl-success-line: #bfdcc4;
+  --tl-warning-ink: #8a5a12;
+  --tl-warning-bg: #f7ecd4;
+  --tl-warning-line: #e8d3a3;
+  --tl-danger-ink: #a83a28;
+  --tl-danger-bg: #f7e3dc;
+  --tl-danger-line: #e7bbae;
+  --tl-info-ink: #2b5f8a;
+  --tl-info-bg: #e1edf6;
+  --tl-info-line: #bdd7ea;
+
+  /* ---- Attention: warm, restrained highlight ---- */
+  --tl-attention-bg: #fbf3df;
+  --tl-attention-line: #e3cd9a;
+
+  /* ---- Typography ---- */
+  --tl-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --tl-font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas,
+    monospace;
+
+  --tl-text-display-size: 1.875rem; /* 30px */
+  --tl-text-display-leading: 2.25rem;
+  --tl-text-display-weight: 650;
+  --tl-text-display-spacing: -0.015em;
+
+  --tl-text-title-size: 1.375rem; /* 22px */
+  --tl-text-title-leading: 1.75rem;
+  --tl-text-title-weight: 650;
+  --tl-text-title-spacing: -0.01em;
+
+  --tl-text-section-size: 1rem; /* 16px */
+  --tl-text-section-leading: 1.375rem;
+  --tl-text-section-weight: 600;
+
+  --tl-text-card-size: 0.875rem; /* 14px */
+  --tl-text-card-leading: 1.25rem;
+  --tl-text-card-weight: 600;
+
+  --tl-text-body-size: 0.875rem;
+  --tl-text-body-leading: 1.3125rem;
+  --tl-text-body-weight: 400;
+
+  --tl-text-secondary-size: 0.8125rem; /* 13px */
+  --tl-text-secondary-leading: 1.1875rem;
+
+  --tl-text-caption-size: 0.75rem; /* 12px */
+  --tl-text-caption-leading: 1rem;
+
+  --tl-text-meta-size: 0.6875rem; /* 11px */
+  --tl-text-meta-leading: 0.875rem;
+  --tl-text-meta-weight: 600;
+  --tl-text-meta-spacing: 0.06em;
+
+  /* ---- Spacing scale (4px base) ---- */
+  --tl-space-xs: 0.25rem; /* 4px */
+  --tl-space-sm: 0.5rem; /* 8px */
+  --tl-space-md: 0.75rem; /* 12px */
+  --tl-space-lg: 1rem; /* 16px */
+  --tl-space-xl: 1.5rem; /* 24px */
+  --tl-space-2xl: 2rem; /* 32px */
+  --tl-space-3xl: 3rem; /* 48px */
+
+  --tl-page-padding: var(--tl-space-xl);
+  --tl-section-gap: var(--tl-space-xl);
+  --tl-card-padding: var(--tl-space-lg);
+  --tl-control-height: 2.25rem; /* 36px */
+  --tl-control-height-sm: 1.875rem; /* 30px */
+
+  /* ---- Radius (refined, never cartoonish) ---- */
+  --tl-radius-sm: 6px; /* inputs, buttons, small controls */
+  --tl-radius-md: 8px; /* cards, panels */
+  --tl-radius-lg: 12px; /* dialogs, sheets */
+  --tl-radius-full: 999px; /* pills, badges, avatars */
+
+  /* ---- Borders before shadows ---- */
+  --tl-border: 1px solid var(--tl-line);
+  --tl-border-strong: 1px solid var(--tl-line-strong);
+
+  /* ---- Shadows: only where elevation is real ---- */
+  --tl-shadow-sm: 0 1px 2px rgb(33 29 22 / 0.06);
+  --tl-shadow-md:
+    0 4px 12px rgb(33 29 22 / 0.08),
+    0 1px 3px rgb(33 29 22 / 0.08);
+  --tl-shadow-lg:
+    0 12px 32px rgb(33 29 22 / 0.14),
+    0 2px 6px rgb(33 29 22 / 0.08);
+
+  /* ---- Layout ---- */
+  --tl-header-height: 3.75rem; /* 60px */
+  --tl-sidebar-width: 15.5rem; /* 248px */
+  --tl-content-max: 72rem;
+
+  /* ---- Motion: fast, subtle, purposeful ---- */
+  --tl-duration-fast: 120ms;
+  --tl-duration-base: 180ms;
+  --tl-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---- Focus ---- */
+  --tl-focus-ring: 0 0 0 2px var(--tl-paper), 0 0 0 4px var(--tl-primary-600);
+}
+
+@media (max-width: 640px) {
+  :root {
+    --tl-page-padding: var(--tl-space-lg);
+    --tl-section-gap: var(--tl-space-lg);
+  }
+}
