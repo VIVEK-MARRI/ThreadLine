@@ -432,3 +432,15 @@ def test_extraction_service_persists_result() -> None:
     assert stored is not None
     assert stored.meeting_id == meeting_id
     assert len(stored.issues) == 1
+
+
+# ---------------------------------------------------------------------------
+# Harness hygiene: _client_with_provider installs global dependency_overrides.
+# Clear them after every test so later files exercise the real dependencies.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _clear_dependency_overrides():
+    yield
+    from app.main import app
+    app.dependency_overrides.clear()

@@ -73,13 +73,25 @@ class AbstractMentionRepository(ABC):
         ...
 
     @abstractmethod
-    def list_by_meeting_id(self, meeting_id: str) -> list[EntityMention]:
-        """Return all mentions observed in a specific meeting."""
+    def list_by_meeting_id(
+        self, meeting_id: str, organisation_id: Optional[str] = None
+    ) -> list[EntityMention]:
+        """Return all mentions observed in a specific meeting.
+
+        When organisation_id is given, only that organisation's mentions are
+        returned.  None preserves the legacy unscoped enumeration.
+        """
         ...
 
     @abstractmethod
-    def list_by_entity_id(self, entity_id: str) -> list[EntityMention]:
-        """Return all mentions that resolved to a specific canonical entity."""
+    def list_by_entity_id(
+        self, entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[EntityMention]:
+        """Return all mentions that resolved to a specific canonical entity.
+
+        When organisation_id is given, only that organisation's mentions are
+        returned.  None preserves the legacy unscoped enumeration.
+        """
         ...
 
     @abstractmethod
@@ -144,13 +156,23 @@ class InMemoryMentionRepository(AbstractMentionRepository):
         """Return the mention with the given ID, or None."""
         return self._store.get(mention_id)
 
-    def list_by_meeting_id(self, meeting_id: str) -> list[EntityMention]:
+    def list_by_meeting_id(
+        self, meeting_id: str, organisation_id: Optional[str] = None
+    ) -> list[EntityMention]:
         """Return all mentions from a specific meeting (linear scan)."""
-        return [m for m in self._store.values() if m.meeting_id == meeting_id]
+        rows = [m for m in self._store.values() if m.meeting_id == meeting_id]
+        if organisation_id is not None:
+            rows = [m for m in rows if m.organisation_id == organisation_id]
+        return rows
 
-    def list_by_entity_id(self, entity_id: str) -> list[EntityMention]:
+    def list_by_entity_id(
+        self, entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[EntityMention]:
         """Return all resolved mentions for a specific entity (linear scan)."""
-        return [m for m in self._store.values() if m.entity_id == entity_id]
+        rows = [m for m in self._store.values() if m.entity_id == entity_id]
+        if organisation_id is not None:
+            rows = [m for m in rows if m.organisation_id == organisation_id]
+        return rows
 
     def list_current_by_meeting_id(
         self,

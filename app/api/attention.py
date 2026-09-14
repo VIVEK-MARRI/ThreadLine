@@ -7,6 +7,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
+from app.api.auth import Authorisation, require_permission
+from app.auth.models import Permission
 from app.api.entities import get_attention_service
 from app.schemas.attention import AttentionResponse, EntityAttentionSchema
 from app.services.attention_service import AttentionService
@@ -32,6 +34,7 @@ router = APIRouter(prefix="/attention", tags=["Attention"])
 )
 def get_attention(
     service: Annotated[AttentionService, Depends(get_attention_service)],
+    _ctx: Authorisation = Depends(require_permission(Permission.INTELLIGENCE_READ)),
 ) -> AttentionResponse:
     """Return all prioritised attention items across the repository."""
     # current_time is omitted to use the service's default of datetime.now(utc)

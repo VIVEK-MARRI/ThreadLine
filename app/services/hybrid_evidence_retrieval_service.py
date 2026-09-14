@@ -76,6 +76,7 @@ class HybridEvidenceRetrievalService:
         semantic_service: SemanticEvidenceRetrievalService,
         semantic_corpus_provider=None,
         current_revision_lookup=None,
+        organisation_id: Optional[str] = None,
     ) -> None:
         """
         Parameters
@@ -91,11 +92,15 @@ class HybridEvidenceRetrievalService:
             Optional callable mapping meeting_id to its authoritative current
             source revision; forwarded to semantic persisted search so stale
             or future semantic records are excluded.
+        organisation_id:
+            Tenant barrier forwarded to semantic persisted search.  Production
+            query paths MUST pass it; None preserves legacy behaviour.
         """
         self._structured = structured_service
         self._semantic = semantic_service
         self._semantic_corpus_provider = semantic_corpus_provider
         self._current_revision_lookup = current_revision_lookup
+        self._organisation_id = organisation_id
 
     def retrieve_evidence(
         self,
@@ -164,6 +169,7 @@ class HybridEvidenceRetrievalService:
                     source_lookup={item.evidence_id: item for item in self._semantic_corpus_provider(current_time)}.get,
                     top_k=max_items,
                     current_revision_lookup=self._current_revision_lookup,
+                    organisation_id=self._organisation_id,
                 )
                 semantic_candidates = [match.evidence for match in semantic_matches]
                 if entity_id is not None:

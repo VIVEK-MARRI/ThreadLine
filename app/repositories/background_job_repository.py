@@ -104,12 +104,16 @@ class AbstractBackgroundJobRepository(ABC):
         ...
 
     @abstractmethod
-    def list(self, status: Optional[BackgroundJobStatus] = None) -> list[BackgroundJob]:
+    def list(
+        self,
+        status: Optional[BackgroundJobStatus] = None,
+        organisation_id: Optional[str] = None,
+    ) -> list[BackgroundJob]:
         ...
 
-    def counts(self) -> dict[str, int]:
+    def counts(self, organisation_id: Optional[str] = None) -> dict[str, int]:
         return {
-            status.value: len(self.list(status))
+            status.value: len(self.list(status, organisation_id))
             for status in BackgroundJobStatus
             if status.name != "COMPLETED"
         }
@@ -210,11 +214,17 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
     def cancel(self, job_id: str) -> BackgroundJob:
         return self.transition(job_id, BackgroundJobStatus.CANCELLED)
 
-    def list(self, status: Optional[BackgroundJobStatus] = None) -> list[BackgroundJob]:
+    def list(
+        self,
+        status: Optional[BackgroundJobStatus] = None,
+        organisation_id: Optional[str] = None,
+    ) -> list[BackgroundJob]:
         with self._lock:
             jobs = list(self._jobs.values())
             if status is not None:
                 jobs = [job for job in jobs if job.status == status]
+            if organisation_id is not None:
+                jobs = [job for job in jobs if job.organisation_id == organisation_id]
             return sorted(jobs, key=lambda job: job.job_id)
 
 
@@ -225,6 +235,10 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
 
     @staticmethod
     def _from_row(row) -> BackgroundJob:
+        try:
+            organisation_id = row["organisation_id"]
+        except Exception:
+            organisation_id = None
         return BackgroundJob(
             job_id=row["job_id"], job_type=row["job_type"], payload_id=row["payload_id"],
             status=row["status"], attempts=row["attempts"], max_attempts=row["max_attempts"],
@@ -233,6 +247,7 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             error_type=row["error_type"], next_retry_at=_parse(row["next_retry_at"]),
             lease_until=_parse(row["lease_until"]), worker_id=row["worker_id"], stage=row["stage"],
             processing_revision=row["processing_revision"],
+            organisation_id=organisation_id or "default",
         )
 
     def enqueue(self, job: BackgroundJob) -> BackgroundJob:
@@ -240,12 +255,12 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             connection.execute(
                 """INSERT INTO background_jobs
                 (job_id, job_type, payload_id, status, attempts, max_attempts, created_at,
-                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision, organisation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO NOTHING""",
                 (job.job_id, job.job_type.value, job.payload_id, job.status.value, job.attempts,
                  job.max_attempts, _iso(job.created_at), _iso(job.started_at), _iso(job.completed_at),
-                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage, job.processing_revision),
+                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage, job.processing_revision, job.organisation_id),
             )
             row = connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job.job_id,)).fetchone()
             return self._from_row(row)
@@ -342,9 +357,22 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
     def cancel(self, job_id: str) -> BackgroundJob:
         return self.transition(job_id, BackgroundJobStatus.CANCELLED)
 
-    def list(self, status: Optional[BackgroundJobStatus] = None) -> list[BackgroundJob]:
-        if status is None:
-            rows = self._store._connection.execute("SELECT * FROM background_jobs ORDER BY job_id").fetchall()
-        else:
-            rows = self._store._connection.execute("SELECT * FROM background_jobs WHERE status=? ORDER BY job_id", (status.value,)).fetchall()
+    def list(
+        self,
+        status: Optional[BackgroundJobStatus] = None,
+        organisation_id: Optional[str] = None,
+    ) -> list[BackgroundJob]:
+        clauses = []
+        args: list[str] = []
+        if status is not None:
+            clauses.append("status = ?")
+            args.append(status.value)
+        if organisation_id is not None:
+            clauses.append("organisation_id = ?")
+            args.append(organisation_id)
+        query = "SELECT * FROM background_jobs"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY job_id"
+        rows = self._store._connection.execute(query, tuple(args)).fetchall()
         return [self._from_row(row) for row in rows]

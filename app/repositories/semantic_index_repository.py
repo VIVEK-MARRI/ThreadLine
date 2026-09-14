@@ -40,6 +40,13 @@ class _FileLock:
     silently falls back to no-op so callers can still rely on in-process
     ``threading.RLock`` for single-process thread safety.
 
+    Thread safety: ONE lock instance is shared by every thread using a
+    repository singleton (API threads + worker thread).  An internal guard
+    plus a held-count makes concurrent ``with`` blocks mutually exclusive
+    and same-thread nesting safe, so two threads can never clobber each
+    other's file descriptor (which previously made one thread unlock/close
+    the other's descriptor → PermissionError on Windows).
+
     Usage::
 
         with _FileLock(lock_path):
@@ -48,58 +55,75 @@ class _FileLock:
 
     def __init__(self, lock_path: str | Path) -> None:
         self._path = Path(lock_path)
+        self._guard = RLock()
+        self._count = 0
         self._fd = None
 
     def __enter__(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._guard.acquire()
         try:
-            self._fd = self._path.open("a+b")
-        except OSError as exc:
-            logger.warning(
-                "OS-level file locking unavailable (could not open %s): %s",
-                self._path,
-                exc,
-            )
-            self._fd = None
-            return
-        try:
-            if sys.platform == "win32":
-                import msvcrt
-                # msvcrt.locking only locks bytes that already exist within
-                # the file; seed a single byte so an empty lock file works.
-                self._fd.seek(0, 2)
-                if self._fd.tell() == 0:
-                    self._fd.write(b"\x00")
-                    self._fd.flush()
-                self._fd.seek(0, 0)
-                msvcrt.locking(self._fd.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError, PermissionError) as exc:
-            logger.warning(
-                "OS-level file locking unavailable for %s: %s",
-                self._path,
-                exc,
-            )
-            if self._fd is not None:
-                self._fd.close()
+            if self._count > 0:
+                # Same thread re-entering: the OS lock is already held.
+                self._count += 1
+                return
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                self._fd = self._path.open("a+b")
+            except OSError as exc:
+                logger.warning(
+                    "OS-level file locking unavailable (could not open %s): %s",
+                    self._path,
+                    exc,
+                )
                 self._fd = None
+                self._count += 1
+                return
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    # msvcrt.locking only locks bytes that already exist within
+                    # the file; seed a single byte so an empty lock file works.
+                    self._fd.seek(0, 2)
+                    if self._fd.tell() == 0:
+                        self._fd.write(b"\x00")
+                        self._fd.flush()
+                    self._fd.seek(0, 0)
+                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+            except (ImportError, OSError, PermissionError) as exc:
+                logger.warning(
+                    "OS-level file locking unavailable for %s: %s",
+                    self._path,
+                    exc,
+                )
+                if self._fd is not None:
+                    self._fd.close()
+                    self._fd = None
+            self._count += 1
+        except BaseException:
+            self._guard.release()
+            raise
 
     def __exit__(self, *exc_info) -> None:
-        if self._fd is None:
-            return
         try:
-            if sys.platform == "win32":
-                import msvcrt
-                self._fd.seek(0, 0)
-                msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+            self._count -= 1
+            if self._count > 0 or self._fd is None:
+                return
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    self._fd.seek(0, 0)
+                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fd.close()
+                self._fd = None
         finally:
-            self._fd.close()
-            self._fd = None
+            self._guard.release()
 
 
 class AbstractSemanticIndexRepository(ABC):
@@ -107,10 +131,16 @@ class AbstractSemanticIndexRepository(ABC):
 
     Provides persistent storage and retrieval of embedding vectors.
     Implementations must ensure:
-      - Composite identity safety (evidence_id + model + version)
+      - Composite identity safety (organisation_id + evidence_id + model + version)
       - No duplicate records by composite key
       - Deterministic ordering
       - Read-only for organisational state (embeddings are derived data)
+
+    Every read method accepts an optional organisation_id tenant filter.
+    None preserves the legacy unscoped behaviour (used by maintenance paths
+    and pre-tenant tests).  Production query paths MUST pass an explicit
+    organisation_id — a vector search without tenant scope is a
+    cross-tenant leak.
     """
 
     @abstractmethod
@@ -119,6 +149,7 @@ class AbstractSemanticIndexRepository(ABC):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> Optional[SemanticIndexRecord]:
         """Retrieve record by composite key.
 
@@ -139,7 +170,9 @@ class AbstractSemanticIndexRepository(ABC):
         ...
 
     @abstractmethod
-    def get_by_evidence_id(self, evidence_id: str) -> list[SemanticIndexRecord]:
+    def get_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records for a given evidence_id.
 
         Returns all embeddings across different models/versions.
@@ -181,6 +214,7 @@ class AbstractSemanticIndexRepository(ABC):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         """Delete a record by composite key.
 
@@ -197,7 +231,9 @@ class AbstractSemanticIndexRepository(ABC):
         ...
 
     @abstractmethod
-    def delete_by_evidence_id(self, evidence_id: str) -> int:
+    def delete_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> int:
         """Delete all records for a given evidence_id.
 
         Parameters
@@ -218,6 +254,7 @@ class AbstractSemanticIndexRepository(ABC):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         """Check if a record exists by composite key.
 
@@ -234,7 +271,9 @@ class AbstractSemanticIndexRepository(ABC):
         ...
 
     @abstractmethod
-    def list_by_model(self, embedding_model: str) -> list[SemanticIndexRecord]:
+    def list_by_model(
+        self, embedding_model: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records for a given embedding model.
 
         Parameters
@@ -250,7 +289,9 @@ class AbstractSemanticIndexRepository(ABC):
         ...
 
     @abstractmethod
-    def list_all(self) -> list[SemanticIndexRecord]:
+    def list_all(
+        self, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records.
 
         Returns
@@ -261,7 +302,7 @@ class AbstractSemanticIndexRepository(ABC):
         ...
 
     @abstractmethod
-    def count(self) -> int:
+    def count(self, organisation_id: Optional[str] = None) -> int:
         """Count total records in the repository.
 
         Returns
@@ -275,11 +316,14 @@ class AbstractSemanticIndexRepository(ABC):
     def search_similar(
         self, query_embedding: list[float], embedding_model: str,
         representation_version: str, top_k: int, min_similarity: float,
+        organisation_id: Optional[str] = None,
     ) -> list[tuple[SemanticIndexRecord, float]]:
         """Search active model/version vectors by application-side similarity."""
         ...
 
-    def count_by_model(self, embedding_model: str) -> int:
+    def count_by_model(
+        self, embedding_model: str, organisation_id: Optional[str] = None
+    ) -> int:
         """Count records for a given model.
 
         Default implementation; may be overridden for efficiency.
@@ -294,7 +338,7 @@ class AbstractSemanticIndexRepository(ABC):
         int
             Record count.
         """
-        return len(self.list_by_model(embedding_model))
+        return len(self.list_by_model(embedding_model, organisation_id))
 
 
 # ---------------------------------------------------------------------------
@@ -310,25 +354,46 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
 
     def __init__(self) -> None:
         """Initialize an empty in-memory repository."""
-        # Key: (evidence_id, embedding_model, representation_version)
-        self._records: dict[tuple[str, str, str], SemanticIndexRecord] = {}
+        # Key: (organisation_id, evidence_id, embedding_model, representation_version)
+        self._records: dict[tuple[str, str, str, str], SemanticIndexRecord] = {}
+
+    @staticmethod
+    def _key(record: SemanticIndexRecord) -> tuple[str, str, str, str]:
+        return (
+            record.organisation_id,
+            record.evidence_id,
+            record.embedding_model,
+            record.representation_version,
+        )
+
+    def _scope(self, record: SemanticIndexRecord, organisation_id: Optional[str]) -> bool:
+        return organisation_id is None or record.organisation_id == organisation_id
 
     def get_by_composite_key(
         self,
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> Optional[SemanticIndexRecord]:
         """Retrieve record by composite key."""
-        key = (evidence_id, embedding_model, representation_version)
-        return self._records.get(key)
+        if organisation_id is not None:
+            return self._records.get(
+                (organisation_id, evidence_id, embedding_model, representation_version)
+            )
+        for key, record in self._records.items():
+            if key[1:] == (evidence_id, embedding_model, representation_version):
+                return record
+        return None
 
-    def get_by_evidence_id(self, evidence_id: str) -> list[SemanticIndexRecord]:
+    def get_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records for a given evidence_id."""
         results = [
             record
-            for key, record in self._records.items()
-            if key[0] == evidence_id
+            for record in self._records.values()
+            if record.evidence_id == evidence_id and self._scope(record, organisation_id)
         ]
         # Sort deterministically by (model, version, evidence_id)
         return sorted(
@@ -338,12 +403,7 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
 
     def upsert(self, record: SemanticIndexRecord) -> SemanticIndexRecord:
         """Insert or update a record."""
-        key = (
-            record.evidence_id,
-            record.embedding_model,
-            record.representation_version,
-        )
-        self._records[key] = record
+        self._records[self._key(record)] = record
         return record
 
     def delete(
@@ -351,18 +411,30 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         """Delete a record by composite key."""
-        key = (evidence_id, embedding_model, representation_version)
-        if key in self._records:
+        if organisation_id is not None:
+            key = (organisation_id, evidence_id, embedding_model, representation_version)
+            if key in self._records:
+                del self._records[key]
+                return True
+            return False
+        keys = [
+            key for key in self._records
+            if key[1:] == (evidence_id, embedding_model, representation_version)
+        ]
+        for key in keys:
             del self._records[key]
-            return True
-        return False
+        return bool(keys)
 
-    def delete_by_evidence_id(self, evidence_id: str) -> int:
+    def delete_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> int:
         """Delete all records for a given evidence_id."""
         keys_to_delete = [
-            key for key in self._records.keys() if key[0] == evidence_id
+            key for key, record in self._records.items()
+            if key[1] == evidence_id and self._scope(record, organisation_id)
         ]
         for key in keys_to_delete:
             del self._records[key]
@@ -373,37 +445,54 @@ class InMemorySemanticIndexRepository(AbstractSemanticIndexRepository):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         """Check if a record exists by composite key."""
-        key = (evidence_id, embedding_model, representation_version)
-        return key in self._records
+        if organisation_id is not None:
+            return (organisation_id, evidence_id, embedding_model, representation_version) in self._records
+        return any(
+            key[1:] == (evidence_id, embedding_model, representation_version)
+            for key in self._records
+        )
 
-    def list_by_model(self, embedding_model: str) -> list[SemanticIndexRecord]:
+    def list_by_model(
+        self, embedding_model: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records for a given embedding model."""
         results = [
             record
             for record in self._records.values()
             if record.embedding_model == embedding_model
+            and self._scope(record, organisation_id)
         ]
         # Sort deterministically
         return sorted(results, key=lambda r: (r.evidence_id, r.representation_version))
 
-    def list_all(self) -> list[SemanticIndexRecord]:
+    def list_all(
+        self, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         """Retrieve all records."""
-        results = list(self._records.values())
+        results = [
+            record for record in self._records.values()
+            if self._scope(record, organisation_id)
+        ]
         # Sort deterministically
         return sorted(
             results, key=lambda r: (r.embedding_model, r.evidence_id, r.representation_version)
         )
 
-    def count(self) -> int:
+    def count(self, organisation_id: Optional[str] = None) -> int:
         """Count total records."""
-        return len(self._records)
+        if organisation_id is None:
+            return len(self._records)
+        return sum(1 for r in self._records.values() if r.organisation_id == organisation_id)
 
-    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity):
+    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity, organisation_id=None):
         matches = []
         for record in self._records.values():
             if record.embedding_model != embedding_model or record.representation_version != representation_version:
+                continue
+            if not self._scope(record, organisation_id):
                 continue
             score = _similarity(query_embedding, record.embedding)
             if score >= min_similarity:
@@ -429,19 +518,24 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         self._path = Path(path)
         self._lock = RLock()
         self._file_lock = _FileLock(self._path.with_suffix(self._path.suffix + ".lock"))
-        self._records: dict[tuple[str, str, str], SemanticIndexRecord] = {}
+        self._records: dict[tuple[str, str, str, str], SemanticIndexRecord] = {}
         # Construct with the same degradation policy as every read: a missing
         # or corrupt durable document becomes an empty snapshot instead of
         # crashing an otherwise-read-only caller (P11).
         self._refresh()
 
     @staticmethod
-    def _key(record: SemanticIndexRecord) -> tuple[str, str, str]:
+    def _key(record: SemanticIndexRecord) -> tuple[str, str, str, str]:
         return (
+            record.organisation_id,
             record.evidence_id,
             record.embedding_model,
             record.representation_version,
         )
+
+    @staticmethod
+    def _in_scope(record: SemanticIndexRecord, organisation_id: Optional[str]) -> bool:
+        return organisation_id is None or record.organisation_id == organisation_id
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -451,7 +545,7 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
             payload = json.load(handle)
         if not isinstance(payload, list):
             raise ValueError("semantic index file must contain a JSON list")
-        fresh: dict[tuple[str, str, str], SemanticIndexRecord] = {}
+        fresh: dict[tuple[str, str, str, str], SemanticIndexRecord] = {}
         for item in payload:
             record = SemanticIndexRecord.model_validate(item)
             fresh[self._key(record)] = record
@@ -481,6 +575,7 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
                 self._records.values(),
                 key=lambda item: (
                     item.embedding_model,
+                    item.organisation_id,
                     item.evidence_id,
                     item.representation_version,
                 ),
@@ -497,17 +592,31 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> Optional[SemanticIndexRecord]:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                return self._records.get((evidence_id, embedding_model, representation_version))
+                if organisation_id is not None:
+                    return self._records.get(
+                        (organisation_id, evidence_id, embedding_model, representation_version)
+                    )
+                for key, record in self._records.items():
+                    if key[1:] == (evidence_id, embedding_model, representation_version):
+                        return record
+                return None
 
-    def get_by_evidence_id(self, evidence_id: str) -> list[SemanticIndexRecord]:
+    def get_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                records = [record for record in self._records.values() if record.evidence_id == evidence_id]
+                records = [
+                    record for record in self._records.values()
+                    if record.evidence_id == evidence_id
+                    and self._in_scope(record, organisation_id)
+                ]
                 return sorted(records, key=lambda item: (item.embedding_model, item.representation_version))
 
     def upsert(self, record: SemanticIndexRecord) -> SemanticIndexRecord:
@@ -523,22 +632,38 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                key = (evidence_id, embedding_model, representation_version)
-                if key not in self._records:
-                    return False
-                del self._records[key]
-                self._persist()
-                return True
+                if organisation_id is not None:
+                    key = (organisation_id, evidence_id, embedding_model, representation_version)
+                    if key not in self._records:
+                        return False
+                    del self._records[key]
+                    self._persist()
+                    return True
+                keys = [
+                    key for key in self._records
+                    if key[1:] == (evidence_id, embedding_model, representation_version)
+                ]
+                for key in keys:
+                    del self._records[key]
+                if keys:
+                    self._persist()
+                return bool(keys)
 
-    def delete_by_evidence_id(self, evidence_id: str) -> int:
+    def delete_by_evidence_id(
+        self, evidence_id: str, organisation_id: Optional[str] = None
+    ) -> int:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                keys = [key for key in self._records if key[0] == evidence_id]
+                keys = [
+                    key for key, record in self._records.items()
+                    if key[1] == evidence_id and self._in_scope(record, organisation_id)
+                ]
                 for key in keys:
                     del self._records[key]
                 if keys:
@@ -550,41 +675,63 @@ class JsonFileSemanticIndexRepository(AbstractSemanticIndexRepository):
         evidence_id: str,
         embedding_model: str,
         representation_version: str,
+        organisation_id: Optional[str] = None,
     ) -> bool:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                return (evidence_id, embedding_model, representation_version) in self._records
+                if organisation_id is not None:
+                    return (organisation_id, evidence_id, embedding_model, representation_version) in self._records
+                return any(
+                    key[1:] == (evidence_id, embedding_model, representation_version)
+                    for key in self._records
+                )
 
-    def list_by_model(self, embedding_model: str) -> list[SemanticIndexRecord]:
+    def list_by_model(
+        self, embedding_model: str, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                records = [record for record in self._records.values() if record.embedding_model == embedding_model]
+                records = [
+                    record for record in self._records.values()
+                    if record.embedding_model == embedding_model
+                    and self._in_scope(record, organisation_id)
+                ]
                 return sorted(records, key=lambda item: (item.evidence_id, item.representation_version))
 
-    def list_all(self) -> list[SemanticIndexRecord]:
+    def list_all(
+        self, organisation_id: Optional[str] = None
+    ) -> list[SemanticIndexRecord]:
         with self._file_lock:
             with self._lock:
                 self._refresh()
+                records = [
+                    record for record in self._records.values()
+                    if self._in_scope(record, organisation_id)
+                ]
                 return sorted(
-                    self._records.values(),
+                    records,
                     key=lambda item: (item.embedding_model, item.evidence_id, item.representation_version),
                 )
 
-    def count(self) -> int:
+    def count(self, organisation_id: Optional[str] = None) -> int:
         with self._file_lock:
             with self._lock:
                 self._refresh()
-                return len(self._records)
+                if organisation_id is None:
+                    return len(self._records)
+                return sum(1 for r in self._records.values() if r.organisation_id == organisation_id)
 
-    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity):
+    def search_similar(self, query_embedding, embedding_model, representation_version, top_k, min_similarity, organisation_id=None):
         with self._file_lock:
             with self._lock:
                 self._refresh()
                 matches = []
                 for record in self._records.values():
                     if record.embedding_model != embedding_model or record.representation_version != representation_version:
+                        continue
+                    if not self._in_scope(record, organisation_id):
                         continue
                     score = _similarity(query_embedding, record.embedding)
                     if score >= min_similarity:

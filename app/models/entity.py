@@ -28,6 +28,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 
 # ---------------------------------------------------------------------------
 # Controlled vocabularies
@@ -106,6 +108,12 @@ class CanonicalEntity(BaseModel):
     # Metadata – set by the service layer, never by the client
     created_at: datetime = Field(
         ..., description="UTC timestamp when this entity was first created."
+    )
+
+    # Tenant scope – stamped by the tenant-scoped repository, never by the client
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description="Organisation that owns this canonical entity.",
     )
 
 
@@ -188,6 +196,12 @@ class EntityMention(BaseModel):
             "Ties durable mention state to an explicit source revision so that "
             "revision N mentions never masquerade as revision N+1."
         ),
+    )
+
+    # Tenant scope – stamped by the tenant-scoped repository, never by the client
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description="Organisation that owns this mention (inherited from its meeting).",
     )
 
 

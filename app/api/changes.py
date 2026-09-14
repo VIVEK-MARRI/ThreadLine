@@ -37,13 +37,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.entities import (
-    _build_current_revision_lookup,
-    _entity_repository,
-    _mention_repository,
-    _dependency_repository,
-    _get_shared_meeting_repository,
-)
+from app.api.auth import Authorisation, get_request_context, require_permission
+from app.auth.models import Permission
 from app.models.organisation_change import (
     OrganisationChangeSeverity,
     OrganisationChangeType,
@@ -65,23 +60,25 @@ from app.temporal.transition_policy import DefaultTransitionPolicy
 router = APIRouter(prefix="/changes", tags=["Changes"])
 
 
-def get_organisation_change_intelligence_service() -> OrganisationChangeIntelligenceService:
-    """FastAPI dependency that provides a configured OrganisationChangeIntelligenceService.
+def get_organisation_change_intelligence_service(
+    ctx: Authorisation = Depends(get_request_context),
+) -> OrganisationChangeIntelligenceService:
+    """FastAPI dependency that provides a tenant-scoped OrganisationChangeIntelligenceService.
 
-    Uses the shared entity, mention, meeting, and dependency repository singletons
-    plus the default keyword-based interpreter and transition policy.
-    OrganisationChangeIntelligenceService internally composes InsightService,
-    AttentionService, DependencyGraphService, and ImpactAnalysisService.
-    All components are stateless and can be recreated freely.
+    All composed intelligence (insights, attention, graphs, impacts) operates
+    on the request's tenant-scoped repositories, so organisation-wide
+    calculations never cross tenant boundaries.
     """
+    from app.api.entities import _build_current_revision_lookup
+
     return OrganisationChangeIntelligenceService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
-        dependency_repo=_dependency_repository,
-        current_revision_lookup=_build_current_revision_lookup(),
+        dependency_repo=ctx.repos.dependencies,
+        current_revision_lookup=_build_current_revision_lookup(ctx),
     )
 
 
@@ -111,6 +108,7 @@ def get_changes_summary(
     service: OrganisationChangeIntelligenceService = Depends(
         get_organisation_change_intelligence_service
     ),
+    _ctx: Authorisation = Depends(require_permission(Permission.INTELLIGENCE_READ)),
 ) -> OrganisationChangeSummaryResponse:
     """Return a structured aggregate summary of organisation-wide changes."""
     ref_time = datetime.now(timezone.utc)
@@ -200,6 +198,7 @@ def get_changes(
     service: OrganisationChangeIntelligenceService = Depends(
         get_organisation_change_intelligence_service
     ),
+    _ctx: Authorisation = Depends(require_permission(Permission.INTELLIGENCE_READ)),
 ) -> OrganisationChangesResponse:
     """Return all detected organisation-wide changes."""
     ref_time = datetime.now(timezone.utc)

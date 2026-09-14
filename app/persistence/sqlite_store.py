@@ -12,7 +12,7 @@ from threading import RLock
 from typing import Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class SQLiteSourceStore:
@@ -156,6 +156,131 @@ class SQLiteSourceStore:
                     "ON dependencies(meeting_id, source_revision)"
                 )
                 connection.execute("INSERT INTO schema_version(version) VALUES (4)")
+                current = 4
+            if current < 5:
+                # Stage 24 tenant isolation.  Every tenant-owned table gains
+                # organisation_id.  ADD COLUMN ... NOT NULL DEFAULT 'default'
+                # is non-destructive: pre-tenant rows land in the explicit
+                # bootstrap organisation ("default"), never in a real user's
+                # organisation.  No FK to organisations(): legacy rows must
+                # survive without a organisations row; scoping is enforced at
+                # the repository boundary.
+                for _table in (
+                    "meetings",
+                    "extraction_results",
+                    "entities",
+                    "entity_mentions",
+                    "dependencies",
+                    "background_jobs",
+                ):
+                    _cols = {
+                        row[1]
+                        for row in connection.execute(
+                            f"PRAGMA table_info({_table})"
+                        ).fetchall()
+                    }
+                    if "organisation_id" not in _cols:
+                        connection.execute(
+                            f"ALTER TABLE {_table} ADD COLUMN organisation_id "
+                            "TEXT NOT NULL DEFAULT 'default'"
+                        )
+                # Backfill job tenant scope from the meeting each job processes
+                # (payload_id == meeting_id for MEETING_PROCESSING).  Jobs
+                # whose meeting is gone keep the bootstrap organisation.
+                connection.execute(
+                    "UPDATE background_jobs SET organisation_id = "
+                    "(SELECT organisation_id FROM meetings "
+                    "WHERE meetings.meeting_id = background_jobs.payload_id) "
+                    "WHERE EXISTS (SELECT 1 FROM meetings "
+                    "WHERE meetings.meeting_id = background_jobs.payload_id)"
+                )
+                for _index_ddl in (
+                    "CREATE INDEX IF NOT EXISTS idx_meetings_org "
+                    "ON meetings(organisation_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_entities_org_name "
+                    "ON entities(organisation_id, entity_type, canonical_name)",
+                    "CREATE INDEX IF NOT EXISTS idx_mentions_org_meeting "
+                    "ON entity_mentions(organisation_id, meeting_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_mentions_org_entity "
+                    "ON entity_mentions(organisation_id, entity_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_dependencies_org_source "
+                    "ON dependencies(organisation_id, source_entity_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_dependencies_org_target "
+                    "ON dependencies(organisation_id, target_entity_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_dependencies_org_meeting "
+                    "ON dependencies(organisation_id, meeting_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_jobs_org_status "
+                    "ON background_jobs(organisation_id, status, next_retry_at)",
+                ):
+                    connection.execute(_index_ddl)
+                connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id TEXT PRIMARY KEY,
+                        email TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email
+                        ON users(email);
+                    CREATE TABLE IF NOT EXISTS organisations (
+                        organisation_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        slug TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_organisations_slug
+                        ON organisations(slug);
+                    CREATE TABLE IF NOT EXISTS organisation_members (
+                        member_id TEXT PRIMARY KEY,
+                        organisation_id TEXT NOT NULL REFERENCES organisations(organisation_id) ON DELETE CASCADE,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        role TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_members_org_user
+                        ON organisation_members(organisation_id, user_id);
+                    CREATE INDEX IF NOT EXISTS idx_members_user
+                        ON organisation_members(user_id);
+                    CREATE TABLE IF NOT EXISTS auth_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        token_hash TEXT NOT NULL,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        revoked_at TEXT
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token
+                        ON auth_sessions(token_hash);
+                    CREATE INDEX IF NOT EXISTS idx_sessions_user
+                        ON auth_sessions(user_id);
+                    CREATE TABLE IF NOT EXISTS auth_login_attempts (
+                        attempt_id TEXT PRIMARY KEY,
+                        email TEXT NOT NULL,
+                        attempted_at TEXT NOT NULL,
+                        success INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_attempts_email_time
+                        ON auth_login_attempts(email, attempted_at);
+                    CREATE TABLE IF NOT EXISTS security_events (
+                        event_id TEXT PRIMARY KEY,
+                        occurred_at TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        user_id TEXT,
+                        organisation_id TEXT,
+                        detail TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_security_events_time
+                        ON security_events(occurred_at);
+                    """
+                )
+                connection.execute("INSERT INTO schema_version(version) VALUES (5)")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

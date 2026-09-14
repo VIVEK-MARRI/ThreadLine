@@ -58,6 +58,24 @@ class Settings(BaseSettings):
     background_max_attempts: int = 3
     background_lease_seconds: int = 60
 
+    # ------------------------------------------------------------------
+    # Stage 24 authentication / tenant isolation settings
+    # ------------------------------------------------------------------
+    # Lifetime of an opaque server-side session token, in seconds.
+    auth_session_ttl_seconds: int = 86400
+    # PBKDF2-HMAC-SHA256 iteration count for password hashing.
+    auth_pbkdf2_iterations: int = 600000
+    # First-run bootstrap: while the user table is EMPTY, requests are
+    # served in the bootstrap organisation without credentials so the very
+    # first owner/organisation can be created (POST /api/v1/auth/bootstrap).
+    # The moment the first user exists, anonymous access ends permanently.
+    # Set to False to fail closed (401 everywhere until bootstrap).
+    auth_open_bootstrap: bool = True
+    # Brute-force protection on login: at most this many failed attempts
+    # per email within the window before further attempts get HTTP 429.
+    auth_rate_limit_max_attempts: int = 5
+    auth_rate_limit_window_seconds: int = 900
+
     @field_validator(
         "source_repository_backend",
         "semantic_index_backend",
@@ -97,6 +115,18 @@ class Settings(BaseSettings):
     def positive_worker_setting(cls, value):
         if value <= 0:
             raise ValueError("worker timing and retry settings must be positive")
+        return value
+
+    @field_validator(
+        "auth_session_ttl_seconds",
+        "auth_pbkdf2_iterations",
+        "auth_rate_limit_max_attempts",
+        "auth_rate_limit_window_seconds",
+    )
+    @classmethod
+    def positive_auth_setting(cls, value):
+        if value <= 0:
+            raise ValueError("auth settings must be positive")
         return value
 
     model_config = ConfigDict(

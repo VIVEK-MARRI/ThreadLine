@@ -6,6 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 
 class BackgroundJobType(str, Enum):
     MEETING_PROCESSING = "MEETING_PROCESSING"
@@ -40,6 +42,14 @@ class BackgroundJob(BaseModel):
     last_error: Optional[str] = None
     attempts: int = Field(default=0, ge=0)
     processing_revision: Optional[str] = None
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description=(
+            "Tenant scope: the organisation whose data this job processes. "
+            "Stamped at enqueue from the meeting; preserved across retry/recovery. "
+            "The worker derives its entire tenant context from this field."
+        ),
+    )
 
     @property
     def error(self) -> Optional[str]:

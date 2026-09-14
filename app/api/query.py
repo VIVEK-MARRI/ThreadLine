@@ -9,6 +9,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.auth import Authorisation, get_request_context, require_permission
+from app.auth.models import Permission
 from app.core.config import settings
 from app.api.entities import (
     _entity_repository,
@@ -128,6 +130,7 @@ _semantic_indexing_service = SemanticIndexingService(
 # ---------------------------------------------------------------------------
 
 def get_evidence_retrieval_service(
+    ctx: Authorisation = Depends(get_request_context),
     timeline_svc=Depends(get_unified_timeline_service),
     memory_svc=Depends(get_organisational_memory_service),
     insight_svc=Depends(get_insight_service),
@@ -139,10 +142,10 @@ def get_evidence_retrieval_service(
     portfolio_svc=Depends(get_portfolio_intelligence_service),
     relationship_svc=Depends(get_entity_relationship_service),
 ) -> EvidenceRetrievalService:
-    """FastAPI dependency that provides a configured EvidenceRetrievalService."""
+    """FastAPI dependency that provides a tenant-scoped EvidenceRetrievalService."""
     return EvidenceRetrievalService(
-        entity_repo=_entity_repository,
-        meeting_repo=_meeting_repository,
+        entity_repo=ctx.repos.entities,
+        meeting_repo=ctx.repos.meetings,
         timeline_svc=timeline_svc,
         memory_svc=memory_svc,
         insight_svc=insight_svc,
@@ -157,12 +160,13 @@ def get_evidence_retrieval_service(
 
 
 def get_natural_language_query_service(
+    ctx: Authorisation = Depends(get_request_context),
     retrieval_svc: EvidenceRetrievalService = Depends(get_evidence_retrieval_service),
 ) -> NaturalLanguageQueryService:
-    """FastAPI dependency that provides a configured NaturalLanguageQueryService."""
+    """FastAPI dependency that provides a tenant-scoped NaturalLanguageQueryService."""
     semantic_service = SemanticEvidenceRetrievalService(
         embedding_provider=_embedding_provider,
-        repository=_semantic_repository,
+        repository=ctx.repos.semantic,
         embedding_model_name=settings.active_embedding_model,
         representation_version=settings.active_representation_version,
     )
@@ -170,7 +174,7 @@ def get_natural_language_query_service(
     def _current_revision(meeting_id):
         if meeting_id is None:
             return None
-        meeting = _meeting_repository.get_by_id(meeting_id)
+        meeting = ctx.repos.meetings.get_by_id(meeting_id)
         if meeting is None:
             return None
         try:
@@ -183,10 +187,11 @@ def get_natural_language_query_service(
         semantic_service=semantic_service,
         semantic_corpus_provider=lambda current_time: retrieval_svc.build_semantic_corpus(current_time),
         current_revision_lookup=_current_revision,
+        organisation_id=ctx.organisation_id,
     )
     return NaturalLanguageQueryService(
         intent_svc=_intent_service,
-        entity_resolver=_entity_resolver,
+        entity_resolver=QueryEntityResolver(entity_repo=ctx.repos.entities),
         retrieval_svc=retrieval_svc,
         context_builder=_context_builder,
         provider=_nl_provider,
@@ -212,6 +217,7 @@ def get_natural_language_query_service(
 def submit_query(
     request: NaturalLanguageQueryRequest,
     service: NaturalLanguageQueryService = Depends(get_natural_language_query_service),
+    _ctx: Authorisation = Depends(require_permission(Permission.QUERY_RUN)),
 ) -> NaturalLanguageQueryResponse:
     """Process a natural language query end-to-end."""
     now = datetime.now(timezone.utc)
@@ -284,6 +290,7 @@ def submit_query(
 def get_query_evidence(
     request: NaturalLanguageQueryRequest,
     service: NaturalLanguageQueryService = Depends(get_natural_language_query_service),
+    _ctx: Authorisation = Depends(require_permission(Permission.QUERY_RUN)),
 ) -> NaturalLanguageEvidenceResponse:
     """Retrieve evidence without generating an answer."""
     now = datetime.now(timezone.utc)

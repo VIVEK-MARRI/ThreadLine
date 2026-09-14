@@ -19,6 +19,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 
 # ---------------------------------------------------------------------------
 # Evidence
@@ -145,6 +147,10 @@ class ExtractionResult(BaseModel):
         default=1,
         ge=1,
         description="Authoritative meeting source revision used for extraction.",
+    )
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description="Organisation that owns this extraction (inherited from its meeting).",
     )
     issues: list[Issue] = Field(
         default_factory=list,

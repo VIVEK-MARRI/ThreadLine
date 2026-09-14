@@ -29,6 +29,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 from app.models.relationships import RelationshipEvidenceType, RelationshipType
 
 
@@ -122,4 +124,9 @@ class ExplicitDependency(BaseModel):
             "Authoritative meeting source revision this dependency was derived from. "
             "Prevents revision-N derived state from masquerading as current revision N+1."
         ),
+    )
+
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description="Organisation that owns this dependency (inherited from its meeting).",
     )

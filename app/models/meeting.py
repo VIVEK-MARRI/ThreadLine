@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 
 class Meeting(BaseModel):
     """Core domain representation of an ingested meeting."""
@@ -41,6 +43,13 @@ class Meeting(BaseModel):
         default=1,
         ge=1,
         description="Monotonic authoritative revision of the meeting source.",
+    )
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description=(
+            "Tenant scope: the organisation that owns this meeting. "
+            "Defaults to the explicit bootstrap organisation for pre-tenant rows."
+        ),
     )
 
     # ------------------------------------------------------------------

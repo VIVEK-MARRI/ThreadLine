@@ -233,6 +233,7 @@ class SemanticEvidenceRetrievalService:
         source_lookup,
         top_k: int = 5,
         current_revision_lookup=None,
+        organisation_id=None,
     ) -> list[SemanticEvidenceMatch]:
         """Search the full active persisted corpus and rehydrate source items.
 
@@ -247,6 +248,12 @@ class SemanticEvidenceRetrievalService:
         revision differs from the authoritative current revision (stale or
         future), are excluded so a past/future revision never masquerades as
         current.  When omitted, no current-revision filtering is applied.
+
+        ``organisation_id`` is the tenant barrier: when provided, the vector
+        search itself is tenant-filtered AND every returned record is
+        re-checked against the scope before rehydration, so a Tenant A query
+        can never retrieve Tenant B evidence even if the injected repository
+        is unscoped.  Production query paths MUST pass it.
         """
         if not query or not query.strip():
             raise ValueError("query must not be empty")
@@ -261,9 +268,15 @@ class SemanticEvidenceRetrievalService:
         for record, score in self._repository.search_similar(
             query_embedding, self._embedding_model_name,
             self._representation_version,
-            max(top_k, self._repository.count_by_model(self._embedding_model_name)),
+            max(top_k, self._repository.count_by_model(
+                self._embedding_model_name, organisation_id)),
             self._min_similarity,
+            organisation_id,
         ):
+            if organisation_id is not None and (
+                getattr(record, "organisation_id", None) != organisation_id
+            ):
+                continue
             evidence = source_lookup(record.evidence_id)
             if evidence is None:
                 continue

@@ -79,17 +79,27 @@ class AbstractDependencyRepository(ABC):
         ...
 
     @abstractmethod
-    def list_by_entity_id(self, entity_id: str) -> list[ExplicitDependency]:
-        """Return all dependency records where entity_id is source OR target."""
+    def list_by_entity_id(
+        self, entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
+        """Return all dependency records where entity_id is source OR target.
+
+        When organisation_id is given, only that organisation's records are
+        returned.  None preserves the legacy unscoped enumeration.
+        """
         ...
 
     @abstractmethod
-    def list_by_source_entity_id(self, source_entity_id: str) -> list[ExplicitDependency]:
+    def list_by_source_entity_id(
+        self, source_entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
         """Return all dependency records where the given entity is the source."""
         ...
 
     @abstractmethod
-    def list_by_target_entity_id(self, target_entity_id: str) -> list[ExplicitDependency]:
+    def list_by_target_entity_id(
+        self, target_entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
         """Return all dependency records where the given entity is the target."""
         ...
 
@@ -99,6 +109,7 @@ class AbstractDependencyRepository(ABC):
         source_entity_id: str,
         target_entity_id: str,
         relationship_type: Optional[RelationshipType] = None,
+        organisation_id: Optional[str] = None,
     ) -> list[ExplicitDependency]:
         """Return dependency records between a specific source and target.
 
@@ -107,8 +118,12 @@ class AbstractDependencyRepository(ABC):
         ...
 
     @abstractmethod
-    def list_all(self) -> list[ExplicitDependency]:
-        """Return all stored dependency records."""
+    def list_all(self, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        """Return all stored dependency records.
+
+        When organisation_id is given, only that organisation's records are
+        returned.  None preserves the legacy unscoped enumeration.
+        """
         ...
 
     @abstractmethod
@@ -185,32 +200,48 @@ class InMemoryDependencyRepository(AbstractDependencyRepository):
         """Return the record with the given ID, or None."""
         return self._store.get(dependency_id)
 
-    def list_by_entity_id(self, entity_id: str) -> list[ExplicitDependency]:
+    def list_by_entity_id(
+        self, entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
         """Return records where entity_id appears as source or target."""
-        return [
+        rows = [
             d for d in self._store.values()
             if d.source_entity_id == entity_id or d.target_entity_id == entity_id
         ]
+        if organisation_id is not None:
+            rows = [d for d in rows if d.organisation_id == organisation_id]
+        return rows
 
-    def list_by_source_entity_id(self, source_entity_id: str) -> list[ExplicitDependency]:
+    def list_by_source_entity_id(
+        self, source_entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
         """Return records where the given entity is the source."""
-        return [
+        rows = [
             d for d in self._store.values()
             if d.source_entity_id == source_entity_id
         ]
+        if organisation_id is not None:
+            rows = [d for d in rows if d.organisation_id == organisation_id]
+        return rows
 
-    def list_by_target_entity_id(self, target_entity_id: str) -> list[ExplicitDependency]:
+    def list_by_target_entity_id(
+        self, target_entity_id: str, organisation_id: Optional[str] = None
+    ) -> list[ExplicitDependency]:
         """Return records where the given entity is the target."""
-        return [
+        rows = [
             d for d in self._store.values()
             if d.target_entity_id == target_entity_id
         ]
+        if organisation_id is not None:
+            rows = [d for d in rows if d.organisation_id == organisation_id]
+        return rows
 
     def list_by_entity_pair(
         self,
         source_entity_id: str,
         target_entity_id: str,
         relationship_type: Optional[RelationshipType] = None,
+        organisation_id: Optional[str] = None,
     ) -> list[ExplicitDependency]:
         """Return records between source and target, optionally filtered by type."""
         results = [
@@ -220,11 +251,16 @@ class InMemoryDependencyRepository(AbstractDependencyRepository):
         ]
         if relationship_type is not None:
             results = [d for d in results if d.relationship_type == relationship_type]
+        if organisation_id is not None:
+            results = [d for d in results if d.organisation_id == organisation_id]
         return results
 
-    def list_all(self) -> list[ExplicitDependency]:
+    def list_all(self, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
         """Return all stored records."""
-        return list(self._store.values())
+        rows = list(self._store.values())
+        if organisation_id is not None:
+            rows = [d for d in rows if d.organisation_id == organisation_id]
+        return rows
 
     def list_current_by_entity_id(
         self,

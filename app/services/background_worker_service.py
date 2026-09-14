@@ -37,8 +37,9 @@ class BackgroundJobScheduler:
         payload_id: str,
         now: Optional[datetime] = None,
         processing_revision: Optional[str] = None,
+        organisation_id: Optional[str] = None,
     ) -> BackgroundJob:
-        job = self.build_job(job_type, payload_id, now, processing_revision)
+        job = self.build_job(job_type, payload_id, now, processing_revision, organisation_id)
         result = self._repository.enqueue(job)
         logger.info("job_created job_id=%s job_type=%s payload_id=%s", result.job_id, result.job_type.value, result.payload_id)
         return result
@@ -49,7 +50,10 @@ class BackgroundJobScheduler:
         payload_id: str,
         now: Optional[datetime] = None,
         processing_revision: Optional[str] = None,
+        organisation_id: Optional[str] = None,
     ) -> BackgroundJob:
+        from app.auth.constants import DEFAULT_ORGANISATION_ID
+
         timestamp = now or datetime.now(timezone.utc)
         return BackgroundJob(
             job_id=(
@@ -62,6 +66,7 @@ class BackgroundJobScheduler:
             processing_revision=processing_revision,
             max_attempts=self._max_attempts,
             created_at=timestamp,
+            organisation_id=organisation_id or DEFAULT_ORGANISATION_ID,
         )
 
     def cancel(self, job_id: str, now: Optional[datetime] = None) -> BackgroundJob:

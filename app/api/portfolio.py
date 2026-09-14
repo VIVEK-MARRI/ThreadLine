@@ -23,6 +23,8 @@ all other API endpoints.
 
 from fastapi import APIRouter, Depends
 
+from app.api.auth import Authorisation, require_permission
+from app.auth.models import Permission
 from app.api.entities import get_portfolio_intelligence_service
 from app.schemas.portfolio import (
     OrganisationPortfolioResponse,
@@ -60,6 +62,7 @@ router = APIRouter(prefix="/portfolio", tags=["Portfolio"])
 )
 def get_portfolio(
     service: PortfolioIntelligenceService = Depends(get_portfolio_intelligence_service),
+    _ctx: Authorisation = Depends(require_permission(Permission.INTELLIGENCE_READ)),
 ) -> OrganisationPortfolioResponse:
     """Return the organisation-wide portfolio snapshot."""
     # current_time is omitted to use datetime.now(utc) as default,

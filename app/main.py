@@ -8,9 +8,11 @@ from datetime import datetime, timezone
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.core.config import settings
+from app.api.auth import router as auth_router
+from app.api.organisations import router as organisations_router
 from app.api.meetings import router as meetings_router
 from app.api.entities import router as entities_router
 from app.api.attention import router as attention_router
@@ -25,30 +27,12 @@ from app.api.jobs import get_job_repository
 from app.models.background_job import BackgroundJobType
 from app.services.background_worker_service import BackgroundWorkerService
 from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
-from app.api.meetings import get_extraction_service
-from app.api.meetings import _extraction_repository
-from app.api.entities import (
-    _dependency_repository,
-    _entity_repository,
-    _mention_repository,
-    get_action_recommendation_service,
-    get_attention_service,
-    get_correlation_service,
-    get_dependency_graph_service,
-    get_entity_relationship_service,
-    get_impact_analysis_service,
-    get_insight_service,
-    get_organisational_memory_service,
-    get_portfolio_intelligence_service,
-    get_resolution_service,
-    get_temporal_state_service,
-    get_unified_timeline_service,
-)
-from app.api.changes import get_organisation_change_intelligence_service
-from app.api.query import _semantic_indexing_service, get_evidence_retrieval_service
-from app.services.dependency_resolution_service import DependencyResolutionService
-from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrator
-from app.services.entity_observation_service import EntityObservationService
+from app.api.query import _semantic_repository
+from app.api.jobs import get_job_repository
+from app.models.background_job import BackgroundJobType
+from app.services.background_worker_service import BackgroundWorkerService
+from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
+from app.api.meetings import get_source_store, get_meeting_repository
 from app.repositories.background_job_repository import StaleJobOwnershipError
 
 _application_worker: BackgroundWorkerService | None = None
@@ -56,40 +40,187 @@ _worker_thread: threading.Thread | None = None
 _worker_stop = threading.Event()
 
 
-def _build_application_worker() -> BackgroundWorkerService:
-    repository = get_job_repository()
+def _build_tenant_graph(organisation_id: str) -> dict:
+    """Build the full processing service graph scoped to one organisation.
 
-    correlation = get_correlation_service()
-    temporal = get_temporal_state_service()
-    memory = get_organisational_memory_service()
-    insights = get_insight_service()
-    attention = get_attention_service()
-    actions = get_action_recommendation_service()
-    timeline = get_unified_timeline_service()
-    relationships = get_entity_relationship_service()
-    dependency_graph = get_dependency_graph_service()
-    impact = get_impact_analysis_service()
-    changes = get_organisation_change_intelligence_service()
-    portfolio = get_portfolio_intelligence_service()
-    evidence = get_evidence_retrieval_service(
-        timeline_svc=timeline, memory_svc=memory, insight_svc=insights,
-        attention_svc=attention, action_svc=actions,
-        dependency_graph_svc=dependency_graph, impact_svc=impact,
-        org_change_svc=changes, portfolio_svc=portfolio,
+    The worker derives its ENTIRE tenant context from the durable job's
+    organisation_id (never from request state — there is no request).  Every
+    repository below is a tenant-scoped view, so a job for Tenant A cannot
+    read, resolve, traverse, index, or query Tenant B data at any stage.
+    """
+    from app.api.auth import _tenant_repos
+    from app.api.meetings import _extraction_provider
+    from app.api.query import _embedding_provider
+    from app.entity_resolution.lexical_candidate_generator import LexicalCandidateGenerator
+    from app.entity_resolution.lexical_candidate_scorer import LexicalCandidateScorer
+    from app.entity_resolution.resolution_policy import ThresholdResolutionPolicy
+    from app.services.action_recommendation_service import ActionRecommendationService
+    from app.services.attention_service import AttentionService
+    from app.services.candidate_scoring_service import CandidateScoringService
+    from app.services.correlation_service import CorrelationService
+    from app.services.dependency_graph_service import DependencyGraphService
+    from app.services.dependency_resolution_service import DependencyResolutionService
+    from app.services.entity_observation_service import EntityObservationService
+    from app.services.entity_relationship_service import EntityRelationshipService
+    from app.services.evidence_retrieval_service import EvidenceRetrievalService
+    from app.services.extraction_service import ExtractionService
+    from app.services.impact_analysis_service import ImpactAnalysisService
+    from app.services.insight_service import InsightService
+    from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrator
+    from app.services.organisational_memory_service import OrganisationalMemoryService
+    from app.services.organisation_change_intelligence_service import (
+        OrganisationChangeIntelligenceService,
+    )
+    from app.services.portfolio_intelligence_service import PortfolioIntelligenceService
+    from app.services.resolution_service import ResolutionService
+    from app.services.semantic_indexing_service import SemanticIndexingService
+    from app.services.temporal_state_service import TemporalStateService
+    from app.services.unified_timeline_service import UnifiedTimelineService
+    from app.temporal.state_interpreter import KeywordStateInterpreter
+    from app.temporal.transition_policy import DefaultTransitionPolicy
+
+    repos = _tenant_repos(organisation_id)
+
+    def _revision_lookup(meeting_id):
+        if meeting_id is None:
+            return None
+        meeting = repos.meetings.get_by_id(meeting_id)
+        if meeting is None:
+            return None
+        try:
+            return int(getattr(meeting, "source_revision", 1) or 1)
+        except (TypeError, ValueError):
+            return None
+
+    interpreter, policy = KeywordStateInterpreter(), DefaultTransitionPolicy()
+    scoring = CandidateScoringService(
+        mention_repo=repos.mentions,
+        entity_repo=repos.entities,
+        generator=LexicalCandidateGenerator(),
+        scorer=LexicalCandidateScorer(),
+    )
+    resolution = ResolutionService(
+        mention_repo=repos.mentions,
+        entity_repo=repos.entities,
+        scoring_service=scoring,
+        policy=ThresholdResolutionPolicy(),
+    )
+    correlation = CorrelationService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+    )
+    temporal = TemporalStateService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    memory = OrganisationalMemoryService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    insights = InsightService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    attention = AttentionService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    actions = ActionRecommendationService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    timeline = UnifiedTimelineService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+    )
+    relationships = EntityRelationshipService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        dependency_repo=repos.dependencies,
+        current_revision_lookup=_revision_lookup,
+    )
+    dependency_graph = DependencyGraphService(
+        dependency_repo=repos.dependencies,
+        entity_repo=repos.entities,
+        current_revision_lookup=_revision_lookup,
+    )
+    impact = ImpactAnalysisService(
+        entity_repo=repos.entities,
+        relationship_service=relationships,
+        temporal_service=temporal,
+        insight_service=insights,
+        attention_service=attention,
+        dependency_graph_service=dependency_graph,
+    )
+    changes = OrganisationChangeIntelligenceService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+        dependency_repo=repos.dependencies,
+        current_revision_lookup=_revision_lookup,
+    )
+    portfolio = PortfolioIntelligenceService(
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        meeting_repo=repos.meetings,
+        interpreter=interpreter,
+        policy=policy,
+        dependency_repo=repos.dependencies,
+    )
+    evidence = EvidenceRetrievalService(
+        entity_repo=repos.entities,
+        meeting_repo=repos.meetings,
+        timeline_svc=timeline,
+        memory_svc=memory,
+        insight_svc=insights,
+        attention_svc=attention,
+        action_svc=actions,
+        dependency_graph_svc=dependency_graph,
+        impact_svc=impact,
+        org_change_svc=changes,
+        portfolio_svc=portfolio,
         relationship_svc=relationships,
     )
     dependency_resolution = DependencyResolutionService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        dependency_repo=_dependency_repository,
+        entity_repo=repos.entities,
+        mention_repo=repos.mentions,
+        dependency_repo=repos.dependencies,
+    )
+    semantic_indexing = SemanticIndexingService(
+        embedding_provider=_embedding_provider,
+        repository=repos.semantic,
+        embedding_model_name=settings.active_embedding_model,
+        representation_version=settings.active_representation_version,
+        current_revision_lookup=_revision_lookup,
     )
     pipeline = MeetingPipelineOrchestrator(
-        extraction_repository=_extraction_repository,
-        mention_repository=_mention_repository,
-        resolution_service=get_resolution_service(),
+        extraction_repository=repos.extractions,
+        mention_repository=repos.mentions,
+        resolution_service=resolution,
         dependency_resolution_service=dependency_resolution,
         evidence_retrieval_service=evidence,
-        semantic_indexing_service=_semantic_indexing_service,
+        semantic_indexing_service=semantic_indexing,
         derived_services=(
             lambda entity_id, now: correlation.get_entity_correlations(entity_id),
             lambda entity_id, now: temporal.get_entity_timeline(entity_id),
@@ -105,12 +236,51 @@ def _build_application_worker() -> BackgroundWorkerService:
         ),
         organisation_derived_services=(lambda now: portfolio.get_portfolio(now),),
         observation_service=EntityObservationService(
-            get_meeting_repository(), _entity_repository, _mention_repository
+            repos.meetings, repos.entities, repos.mentions
         ),
-        meeting_repository=get_meeting_repository(),
+        meeting_repository=repos.meetings,
     )
+    extraction_service = ExtractionService(
+        meeting_repository=repos.meetings,
+        extraction_repository=repos.extractions,
+        provider=_extraction_provider,
+    )
+    return {
+        "repos": repos,
+        "pipeline": pipeline,
+        "extraction_service": extraction_service,
+    }
+
+
+def _build_application_worker() -> BackgroundWorkerService:
+    from app.auth.constants import DEFAULT_ORGANISATION_ID
+
+    # The job repository stays UNSCOPED: the worker must claim every
+    # organisation's jobs.  Tenant scope is derived per job from the durable
+    # job row and enforced by the scoped service graph below.
+    repository = get_job_repository()
 
     def process_meeting(job):
+        from app.services.background_worker_service import PermanentJobError
+
+        organisation_id = getattr(job, "organisation_id", None) or DEFAULT_ORGANISATION_ID
+        graph = _build_tenant_graph(organisation_id)
+        scoped_meetings = graph["repos"].meetings
+        pipeline = graph["pipeline"]
+        extraction_service = graph["extraction_service"]
+
+        # Cross-tenant job barrier: the meeting this job targets must belong
+        # to the job's organisation.  A missing meeting keeps the historical
+        # retry path (MeetingNotFound flow downstream); a meeting owned by a
+        # DIFFERENT organisation is a security violation — fail permanently,
+        # never process, never retry.
+        if scoped_meetings.get_by_id(job.payload_id) is None:
+            if get_meeting_repository().get_by_id(job.payload_id) is not None:
+                raise PermanentJobError(
+                    f"job '{job.job_id}' targets a meeting outside organisation "
+                    f"'{organisation_id}'; refusing to process"
+                )
+
         def assert_owned():
             current = repository.get(job.job_id)
             now = datetime.now(timezone.utc)
@@ -128,7 +298,6 @@ def _build_application_worker() -> BackgroundWorkerService:
                 )
 
         pipeline.set_ownership_checker(assert_owned)
-        extraction_service = get_extraction_service()
         if hasattr(extraction_service, "set_ownership_checker"):
             extraction_service.set_ownership_checker(assert_owned)
         handlers = {
@@ -197,6 +366,8 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.include_router(auth_router, prefix=settings.api_v1_prefix)
+app.include_router(organisations_router, prefix=settings.api_v1_prefix)
 app.include_router(meetings_router, prefix=settings.api_v1_prefix)
 app.include_router(entities_router, prefix=settings.api_v1_prefix)
 app.include_router(attention_router, prefix=settings.api_v1_prefix)
@@ -226,15 +397,37 @@ def health() -> HealthResponse:
     tags=["Health"],
     summary="Internal storage diagnostics",
 )
-def health_diagnostics() -> dict:
-    """Return backend availability without exposing storage internals."""
-    source_store = get_source_store()
-    from app.api.jobs import get_job_repository
+def health_diagnostics(request: Request) -> dict:
+    """Return backend availability without exposing storage internals.
 
-    job_repository = get_job_repository()
+    Open while bootstrap is open (no users yet — workers poll this).  Once
+    authentication is active, ADMIN/OWNER only and scoped to the caller's
+    organisation.
+    """
+    from fastapi import Depends, HTTPException, status as _status
+
+    from app.api.auth import get_request_context
+    from app.api.jobs import get_job_repository
+    from app.auth.models import Permission, has_permission
+
+    ctx = get_request_context(request)
+    source_store = get_source_store()
+    if ctx.anonymous:
+        job_repository = get_job_repository()
+    else:
+        if not has_permission(ctx.role, Permission.DIAGNOSTICS_READ):
+            raise HTTPException(
+                status_code=_status.HTTP_403_FORBIDDEN,
+                detail=f"role '{ctx.role.value if ctx.role else None}' lacks permission "
+                f"'{Permission.DIAGNOSTICS_READ.value}'",
+            )
+        job_repository = ctx.repos.jobs
     semantic_available = True
     try:
-        _semantic_repository.count()
+        if ctx.anonymous:
+            _semantic_repository.count()
+        else:
+            ctx.repos.semantic.count()
     except Exception:
         semantic_available = False
     return {

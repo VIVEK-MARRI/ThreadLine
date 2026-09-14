@@ -75,7 +75,12 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
                         f"stale source write rejected for {meeting.meeting_id}: "
                         f"incoming revision {meeting.source_revision} < durable revision {current_rev}"
                     )
-                if int(meeting.source_revision) == current_rev and row["payload"] != _dump(meeting):
+                # Compare through the model so rows written before a field
+                # existed (defaults applied on read) do not spuriously
+                # conflict with the same logical payload.
+                if int(meeting.source_revision) == current_rev and _dump(
+                    Meeting.model_validate_json(row["payload"])
+                ) != _dump(meeting):
                     # Same revision number with different payload: concurrent
                     # refresh lost-update. Caller must re-read and retry as N+1.
                     from app.services.meeting_service import MeetingConflictError
@@ -84,9 +89,9 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
                         f"concurrent source refresh for '{meeting.meeting_id}' at revision {current_rev}; retry as revision {current_rev + 1}"
                     )
             connection.execute(
-                "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload",
-                (meeting.meeting_id, meeting.meeting_date.isoformat(), meeting.source_revision, _dump(meeting)),
+                "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload, organisation_id) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload, organisation_id=excluded.organisation_id",
+                (meeting.meeting_id, meeting.meeting_date.isoformat(), meeting.source_revision, _dump(meeting), meeting.organisation_id),
             )
 
     def save_and_enqueue(self, meeting: Meeting, job: BackgroundJob) -> None:
@@ -104,25 +109,27 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
                         f"stale source write rejected for {meeting.meeting_id}: "
                         f"incoming revision {meeting.source_revision} < durable revision {current_rev}"
                     )
-                if int(meeting.source_revision) == current_rev and row["payload"] != _dump(meeting):
+                if int(meeting.source_revision) == current_rev and _dump(
+                    Meeting.model_validate_json(row["payload"])
+                ) != _dump(meeting):
                     from app.services.meeting_service import MeetingConflictError
 
                     raise MeetingConflictError(
                         f"concurrent source refresh for '{meeting.meeting_id}' at revision {current_rev}; retry as revision {current_rev + 1}"
                     )
             connection.execute(
-                "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload",
-                (meeting.meeting_id, meeting.meeting_date.isoformat(), meeting.source_revision, _dump(meeting)),
+                "INSERT INTO meetings(meeting_id, meeting_date, source_revision, payload, organisation_id) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(meeting_id) DO UPDATE SET meeting_date=excluded.meeting_date, source_revision=excluded.source_revision, payload=excluded.payload, organisation_id=excluded.organisation_id",
+                (meeting.meeting_id, meeting.meeting_date.isoformat(), meeting.source_revision, _dump(meeting), meeting.organisation_id),
             )
             connection.execute(
                 """INSERT INTO background_jobs
                 (job_id, job_type, payload_id, status, attempts, max_attempts, created_at,
-                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision, organisation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO NOTHING""",
                 (job.job_id, job.job_type.value, job.payload_id, job.status.value, job.attempts,
-                 job.max_attempts, job.created_at.isoformat(), None, None, None, None, None, None, None, job.stage, job.processing_revision),
+                 job.max_attempts, job.created_at.isoformat(), None, None, None, None, None, None, None, job.stage, job.processing_revision, job.organisation_id),
             )
 
     def get_by_id(self, meeting_id: str) -> Optional[Meeting]:
@@ -140,9 +147,9 @@ class SQLiteExtractionRepository(AbstractExtractionRepository):
         with self._store.transaction() as connection:
             _guard_derived_revision(connection, result.meeting_id, result.source_revision, kind="extraction")
             connection.execute(
-                "INSERT INTO extraction_results(meeting_id, extracted_at, payload, source_revision) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(meeting_id) DO UPDATE SET extracted_at=excluded.extracted_at, payload=excluded.payload, source_revision=excluded.source_revision",
-                (result.meeting_id, result.extracted_at.isoformat(), _dump(result), result.source_revision),
+                "INSERT INTO extraction_results(meeting_id, extracted_at, payload, source_revision, organisation_id) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(meeting_id) DO UPDATE SET extracted_at=excluded.extracted_at, payload=excluded.payload, source_revision=excluded.source_revision, organisation_id=excluded.organisation_id",
+                (result.meeting_id, result.extracted_at.isoformat(), _dump(result), result.source_revision, result.organisation_id),
             )
 
     def get_by_meeting_id(self, meeting_id: str) -> Optional[ExtractionResult]:
@@ -159,9 +166,9 @@ class SQLiteEntityRepository(AbstractEntityRepository):
     def create(self, entity: CanonicalEntity) -> None:
         with self._store.transaction() as connection:
             connection.execute(
-                "INSERT INTO entities(entity_id, entity_type, canonical_name, payload) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(entity_id) DO UPDATE SET entity_type=excluded.entity_type, canonical_name=excluded.canonical_name, payload=excluded.payload",
-                (entity.entity_id, entity.entity_type.value, entity.canonical_name, _dump(entity)),
+                "INSERT INTO entities(entity_id, entity_type, canonical_name, payload, organisation_id) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(entity_id) DO UPDATE SET entity_type=excluded.entity_type, canonical_name=excluded.canonical_name, payload=excluded.payload, organisation_id=excluded.organisation_id",
+                (entity.entity_id, entity.entity_type.value, entity.canonical_name, _dump(entity), entity.organisation_id),
             )
 
     def get_by_id(self, entity_id: str) -> Optional[CanonicalEntity]:
@@ -170,12 +177,18 @@ class SQLiteEntityRepository(AbstractEntityRepository):
         ).fetchone()
         return CanonicalEntity.model_validate_json(row[0]) if row else None
 
-    def find_by_canonical_name(self, name: str, entity_type: EntityType) -> Optional[CanonicalEntity]:
+    def find_by_canonical_name(self, name: str, entity_type: EntityType, organisation_id: Optional[str] = None) -> Optional[CanonicalEntity]:
         target = _normalize(name)
-        rows = self._store._connection.execute(
-            "SELECT payload FROM entities WHERE entity_type = ? ORDER BY entity_id",
-            (entity_type.value,),
-        ).fetchall()
+        if organisation_id is None:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entities WHERE entity_type = ? ORDER BY entity_id",
+                (entity_type.value,),
+            ).fetchall()
+        else:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entities WHERE entity_type = ? AND organisation_id = ? ORDER BY entity_id",
+                (entity_type.value, organisation_id),
+            ).fetchall()
         for row in rows:
             entity = CanonicalEntity.model_validate_json(row[0])
             if _normalize(entity.canonical_name) == target or any(
@@ -184,16 +197,20 @@ class SQLiteEntityRepository(AbstractEntityRepository):
                 return entity
         return None
 
-    def list_entities(self, entity_type: Optional[EntityType] = None) -> list[CanonicalEntity]:
-        if entity_type is None:
-            rows = self._store._connection.execute(
-                "SELECT payload FROM entities ORDER BY entity_id"
-            ).fetchall()
-        else:
-            rows = self._store._connection.execute(
-                "SELECT payload FROM entities WHERE entity_type = ? ORDER BY entity_id",
-                (entity_type.value,),
-            ).fetchall()
+    def list_entities(self, entity_type: Optional[EntityType] = None, organisation_id: Optional[str] = None) -> list[CanonicalEntity]:
+        clauses = []
+        args: list[str] = []
+        if entity_type is not None:
+            clauses.append("entity_type = ?")
+            args.append(entity_type.value)
+        if organisation_id is not None:
+            clauses.append("organisation_id = ?")
+            args.append(organisation_id)
+        query = "SELECT payload FROM entities"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY entity_id"
+        rows = self._store._connection.execute(query, tuple(args)).fetchall()
         return [CanonicalEntity.model_validate_json(row[0]) for row in rows]
 
     def add_alias(self, entity_id: str, alias: str) -> Optional[CanonicalEntity]:
@@ -213,9 +230,9 @@ class SQLiteMentionRepository(AbstractMentionRepository):
         with self._store.transaction() as connection:
             _guard_derived_revision(connection, mention.meeting_id, mention.source_revision, kind="mention")
             connection.execute(
-                "INSERT INTO entity_mentions(mention_id, meeting_id, entity_id, entity_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(mention_id) DO UPDATE SET meeting_id=excluded.meeting_id, entity_id=excluded.entity_id, entity_type=excluded.entity_type, payload=excluded.payload, source_revision=excluded.source_revision",
-                (mention.mention_id, mention.meeting_id, mention.entity_id, mention.entity_type.value, _dump(mention), mention.source_revision),
+                "INSERT INTO entity_mentions(mention_id, meeting_id, entity_id, entity_type, payload, source_revision, organisation_id) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(mention_id) DO UPDATE SET meeting_id=excluded.meeting_id, entity_id=excluded.entity_id, entity_type=excluded.entity_type, payload=excluded.payload, source_revision=excluded.source_revision, organisation_id=excluded.organisation_id",
+                (mention.mention_id, mention.meeting_id, mention.entity_id, mention.entity_type.value, _dump(mention), mention.source_revision, mention.organisation_id),
             )
 
     def get_by_id(self, mention_id: str) -> Optional[EntityMention]:
@@ -224,16 +241,28 @@ class SQLiteMentionRepository(AbstractMentionRepository):
         ).fetchone()
         return EntityMention.model_validate_json(row[0]) if row else None
 
-    def list_by_meeting_id(self, meeting_id: str) -> list[EntityMention]:
-        rows = self._store._connection.execute(
-            "SELECT payload FROM entity_mentions WHERE meeting_id = ? ORDER BY mention_id", (meeting_id,)
-        ).fetchall()
+    def list_by_meeting_id(self, meeting_id: str, organisation_id: Optional[str] = None) -> list[EntityMention]:
+        if organisation_id is None:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entity_mentions WHERE meeting_id = ? ORDER BY mention_id", (meeting_id,)
+            ).fetchall()
+        else:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entity_mentions WHERE meeting_id = ? AND organisation_id = ? ORDER BY mention_id",
+                (meeting_id, organisation_id),
+            ).fetchall()
         return [EntityMention.model_validate_json(row[0]) for row in rows]
 
-    def list_by_entity_id(self, entity_id: str) -> list[EntityMention]:
-        rows = self._store._connection.execute(
-            "SELECT payload FROM entity_mentions WHERE entity_id = ? ORDER BY mention_id", (entity_id,)
-        ).fetchall()
+    def list_by_entity_id(self, entity_id: str, organisation_id: Optional[str] = None) -> list[EntityMention]:
+        if organisation_id is None:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entity_mentions WHERE entity_id = ? ORDER BY mention_id", (entity_id,)
+            ).fetchall()
+        else:
+            rows = self._store._connection.execute(
+                "SELECT payload FROM entity_mentions WHERE entity_id = ? AND organisation_id = ? ORDER BY mention_id",
+                (entity_id, organisation_id),
+            ).fetchall()
         return [EntityMention.model_validate_json(row[0]) for row in rows]
 
     def list_current_by_meeting_id(
@@ -266,9 +295,9 @@ class SQLiteDependencyRepository(AbstractDependencyRepository):
         with self._store.transaction() as connection:
             _guard_derived_revision(connection, dependency.meeting_id, dependency.source_revision, kind="dependency")
             connection.execute(
-                "INSERT INTO dependencies(dependency_id, source_entity_id, target_entity_id, meeting_id, relationship_type, payload, source_revision) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(dependency_id) DO UPDATE SET source_entity_id=excluded.source_entity_id, target_entity_id=excluded.target_entity_id, meeting_id=excluded.meeting_id, relationship_type=excluded.relationship_type, payload=excluded.payload, source_revision=excluded.source_revision",
-                (dependency.dependency_id, dependency.source_entity_id, dependency.target_entity_id, dependency.meeting_id, dependency.relationship_type.value, _dump(dependency), dependency.source_revision),
+                "INSERT INTO dependencies(dependency_id, source_entity_id, target_entity_id, meeting_id, relationship_type, payload, source_revision, organisation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(dependency_id) DO UPDATE SET source_entity_id=excluded.source_entity_id, target_entity_id=excluded.target_entity_id, meeting_id=excluded.meeting_id, relationship_type=excluded.relationship_type, payload=excluded.payload, source_revision=excluded.source_revision, organisation_id=excluded.organisation_id",
+                (dependency.dependency_id, dependency.source_entity_id, dependency.target_entity_id, dependency.meeting_id, dependency.relationship_type.value, _dump(dependency), dependency.source_revision, dependency.organisation_id),
             )
 
     def get_by_id(self, dependency_id: str) -> Optional[ExplicitDependency]:
@@ -277,35 +306,44 @@ class SQLiteDependencyRepository(AbstractDependencyRepository):
         ).fetchone()
         return ExplicitDependency.model_validate_json(row[0]) if row else None
 
-    def list_by_entity_id(self, entity_id: str) -> list[ExplicitDependency]:
+    def list_by_entity_id(self, entity_id: str, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        if organisation_id is None:
+            clause: str = "source_entity_id = ? OR target_entity_id = ?"
+            args: tuple = (entity_id, entity_id)
+        else:
+            clause = "(source_entity_id = ? OR target_entity_id = ?) AND organisation_id = ?"
+            args = (entity_id, entity_id, organisation_id)
         rows = self._store._connection.execute(
-            "SELECT payload FROM dependencies WHERE source_entity_id = ? OR target_entity_id = ? ORDER BY dependency_id",
-            (entity_id, entity_id),
+            f"SELECT payload FROM dependencies WHERE {clause} ORDER BY dependency_id",
+            args,
         ).fetchall()
         return [ExplicitDependency.model_validate_json(row[0]) for row in rows]
 
-    def list_by_source_entity_id(self, source_entity_id: str) -> list[ExplicitDependency]:
-        return self._list_where("source_entity_id = ?", (source_entity_id,))
+    def list_by_source_entity_id(self, source_entity_id: str, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        return self._list_where("source_entity_id = ?", (source_entity_id,), organisation_id)
 
-    def list_by_target_entity_id(self, target_entity_id: str) -> list[ExplicitDependency]:
-        return self._list_where("target_entity_id = ?", (target_entity_id,))
+    def list_by_target_entity_id(self, target_entity_id: str, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        return self._list_where("target_entity_id = ?", (target_entity_id,), organisation_id)
 
-    def list_by_entity_pair(self, source_entity_id: str, target_entity_id: str, relationship_type: Optional[RelationshipType] = None) -> list[ExplicitDependency]:
+    def list_by_entity_pair(self, source_entity_id: str, target_entity_id: str, relationship_type: Optional[RelationshipType] = None, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
         query = "source_entity_id = ? AND target_entity_id = ?"
         args: list[str] = [source_entity_id, target_entity_id]
         if relationship_type is not None:
             query += " AND relationship_type = ?"
             args.append(relationship_type.value)
-        return self._list_where(query, tuple(args))
+        return self._list_where(query, tuple(args), organisation_id)
 
-    def _list_where(self, clause: str, args: tuple) -> list[ExplicitDependency]:
+    def _list_where(self, clause: str, args: tuple, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        if organisation_id is not None:
+            clause = f"({clause}) AND organisation_id = ?"
+            args = (*args, organisation_id)
         rows = self._store._connection.execute(
             f"SELECT payload FROM dependencies WHERE {clause} ORDER BY dependency_id", args
         ).fetchall()
         return [ExplicitDependency.model_validate_json(row[0]) for row in rows]
 
-    def list_all(self) -> list[ExplicitDependency]:
-        return self._list_where("1 = 1", ())
+    def list_all(self, organisation_id: Optional[str] = None) -> list[ExplicitDependency]:
+        return self._list_where("1 = 1", (), organisation_id)
 
     def list_current_by_entity_id(
         self,

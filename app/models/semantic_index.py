@@ -26,12 +26,15 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.auth.constants import DEFAULT_ORGANISATION_ID
+
 
 class SemanticIndexRecord(BaseModel):
     """A persistent semantic index record.
 
     Represents a single embedding and its metadata.
-    Primary key: (evidence_id, embedding_model, representation_version).
+    Primary key: (organisation_id, evidence_id, embedding_model,
+    representation_version).
 
     Fields
     ------
@@ -116,16 +119,27 @@ class SemanticIndexRecord(BaseModel):
         ),
     )
 
+    organisation_id: str = Field(
+        default=DEFAULT_ORGANISATION_ID,
+        description=(
+            "Tenant scope: the organisation that owns this semantic evidence. "
+            "Part of the durable index key — identical evidence in two "
+            "organisations MUST NOT share a record. Every vector search "
+            "filters on this field."
+        ),
+    )
+
     def __hash__(self):
-        """Hash by composite identity."""
-        return hash((self.evidence_id, self.embedding_model, self.representation_version))
+        """Hash by composite identity (organisation-scoped)."""
+        return hash((self.organisation_id, self.evidence_id, self.embedding_model, self.representation_version))
 
     def __eq__(self, other):
         """Equality by composite identity (not full record)."""
         if not isinstance(other, SemanticIndexRecord):
             return False
         return (
-            self.evidence_id == other.evidence_id
+            self.organisation_id == other.organisation_id
+            and self.evidence_id == other.evidence_id
             and self.embedding_model == other.embedding_model
             and self.representation_version == other.representation_version
         )

@@ -60,21 +60,29 @@ class AbstractEntityRepository(ABC):
 
     @abstractmethod
     def find_by_canonical_name(
-        self, name: str, entity_type: EntityType
+        self, name: str, entity_type: EntityType, organisation_id: Optional[str] = None
     ) -> Optional[CanonicalEntity]:
         """Return an entity whose canonical_name or any alias matches *name*
         (after normalisation) within the given entity_type, or None.
 
         Only entities of the specified entity_type are searched.  A mention of
         "Rahul" for entity_type=PERSON must not resolve to an ISSUE named "Rahul".
+
+        When organisation_id is given, only that organisation's entities are
+        searched (tenant isolation for entity resolution).  None preserves the
+        legacy global search.
         """
         ...
 
     @abstractmethod
     def list_entities(
-        self, entity_type: Optional[EntityType] = None
+        self, entity_type: Optional[EntityType] = None, organisation_id: Optional[str] = None
     ) -> list[CanonicalEntity]:
-        """Return all entities, optionally filtered by entity_type."""
+        """Return all entities, optionally filtered by entity_type.
+
+        When organisation_id is given, only that organisation's entities are
+        returned.  None preserves the legacy global enumeration.
+        """
         ...
 
     @abstractmethod
@@ -110,7 +118,7 @@ class InMemoryEntityRepository(AbstractEntityRepository):
         return self._store.get(entity_id)
 
     def find_by_canonical_name(
-        self, name: str, entity_type: EntityType
+        self, name: str, entity_type: EntityType, organisation_id: Optional[str] = None
     ) -> Optional[CanonicalEntity]:
         """Search canonical_name and aliases (case-insensitive, normalised).
 
@@ -122,6 +130,8 @@ class InMemoryEntityRepository(AbstractEntityRepository):
         for entity in self._store.values():
             if entity.entity_type != entity_type:
                 continue
+            if organisation_id is not None and entity.organisation_id != organisation_id:
+                continue
             if _normalize(entity.canonical_name) == target:
                 return entity
             for alias in entity.aliases:
@@ -130,12 +140,14 @@ class InMemoryEntityRepository(AbstractEntityRepository):
         return None
 
     def list_entities(
-        self, entity_type: Optional[EntityType] = None
+        self, entity_type: Optional[EntityType] = None, organisation_id: Optional[str] = None
     ) -> list[CanonicalEntity]:
         """Return all entities, optionally filtered by entity_type."""
         entities = list(self._store.values())
         if entity_type is not None:
             entities = [e for e in entities if e.entity_type == entity_type]
+        if organisation_id is not None:
+            entities = [e for e in entities if e.organisation_id == organisation_id]
         return entities
 
     def add_alias(self, entity_id: str, alias: str) -> Optional[CanonicalEntity]:

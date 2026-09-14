@@ -10,6 +10,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.models.background_job import BackgroundJobType
 
+from app.api.auth import Authorisation, get_request_context, require_permission
+from app.auth.models import Permission
+
 from app.core.config import settings
 from app.extraction.base import (
     ExtractionError,
@@ -118,8 +121,10 @@ _extraction_provider = _build_extraction_provider()
 # Dependency injection
 # ---------------------------------------------------------------------------
 
-def get_meeting_service() -> MeetingService:
-    """FastAPI dependency that provides a configured MeetingService."""
+def get_meeting_service(
+    ctx: Authorisation = Depends(get_request_context),
+) -> MeetingService:
+    """FastAPI dependency that provides a tenant-scoped MeetingService."""
     def persist_ingestion(meeting: Meeting) -> None:
         from app.api.jobs import get_job_scheduler
         from app.services.processing_consistency_service import processing_revision_for
@@ -129,21 +134,20 @@ def get_meeting_service() -> MeetingService:
             BackgroundJobType.MEETING_PROCESSING,
             meeting.meeting_id,
             processing_revision=processing_revision_for(meeting.source_revision),
+            organisation_id=ctx.organisation_id,
         )
-        if isinstance(_meeting_repository, SQLiteMeetingRepository):
-            _meeting_repository.save_and_enqueue(meeting, job)
-        else:
-            _meeting_repository.save(meeting)
-            scheduler._repository.enqueue(job)
+        ctx.repos.save_meeting_and_enqueue(meeting, job)
 
-    return MeetingService(repository=_meeting_repository, ingestion_persister=persist_ingestion)
+    return MeetingService(repository=ctx.repos.meetings, ingestion_persister=persist_ingestion)
 
 
-def get_extraction_service() -> ExtractionService:
-    """FastAPI dependency that provides a configured ExtractionService."""
+def get_extraction_service(
+    ctx: Authorisation = Depends(get_request_context),
+) -> ExtractionService:
+    """FastAPI dependency that provides a tenant-scoped ExtractionService."""
     return ExtractionService(
-        meeting_repository=_meeting_repository,
-        extraction_repository=_extraction_repository,
+        meeting_repository=ctx.repos.meetings,
+        extraction_repository=ctx.repos.extractions,
         provider=_extraction_provider,
     )
 
@@ -220,6 +224,7 @@ def _extraction_to_response(result) -> ExtractionResponse:
 def ingest_meeting(
     request: MeetingIngestRequest,
     service: MeetingService = Depends(get_meeting_service),
+    ctx: Authorisation = Depends(require_permission(Permission.MEETING_CREATE)),
 ) -> MeetingIngestResponse:
     """Ingest a meeting and return its assigned ID.
 
@@ -240,6 +245,7 @@ def ingest_meeting(
         BackgroundJobType.MEETING_PROCESSING,
         meeting.meeting_id,
         processing_revision=processing_revision_for(meeting.source_revision),
+        organisation_id=ctx.organisation_id,
     )
     return MeetingIngestResponse(meeting_id=meeting.meeting_id, status="ingested")
 
@@ -253,6 +259,7 @@ def ingest_meeting(
 def get_meeting(
     meeting_id: str,
     service: MeetingService = Depends(get_meeting_service),
+    _ctx: Authorisation = Depends(require_permission(Permission.MEETING_READ)),
 ) -> MeetingResponse:
     """Return a meeting by its ID or raise HTTP 404."""
     meeting = service.get_meeting(meeting_id)
@@ -274,6 +281,7 @@ def revise_meeting(
     meeting_id: str,
     request: MeetingIngestRequest,
     service: MeetingService = Depends(get_meeting_service),
+    ctx: Authorisation = Depends(require_permission(Permission.MEETING_UPDATE)),
 ) -> MeetingIngestResponse:
     """Persist a changed source and enqueue its distinct processing revision.
 
@@ -304,13 +312,10 @@ def revise_meeting(
             BackgroundJobType.MEETING_PROCESSING,
             meeting_id,
             processing_revision=processing_revision_for(meeting.source_revision),
+            organisation_id=ctx.organisation_id,
         )
         try:
-            if isinstance(_meeting_repository, SQLiteMeetingRepository):
-                _meeting_repository.save_and_enqueue(meeting, job)
-            else:
-                _meeting_repository.save(meeting)
-                scheduler._repository.enqueue(job)
+            ctx.repos.save_meeting_and_enqueue(meeting, job)
         except MeetingConflictError as exc:
             last_conflict = exc
             continue
@@ -336,6 +341,7 @@ def revise_meeting(
 def extract_meeting(
     meeting_id: str,
     service: ExtractionService = Depends(get_extraction_service),
+    ctx: Authorisation = Depends(require_permission(Permission.PROCESSING_RUN)),
 ) -> ExtractionResponse:
     """Trigger extraction refresh and enqueue its distinct processing revision.
 
@@ -389,6 +395,7 @@ def extract_meeting(
         processing_revision=processing_revision_for(
             result.source_revision, suffix=result.extracted_at.isoformat()
         ),
+        organisation_id=ctx.organisation_id,
     )
     return _extraction_to_response(result)
 

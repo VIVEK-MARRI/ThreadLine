@@ -28,8 +28,12 @@ Sub-resource routes (/{entity_id}/timeline, /{entity_id}/correlations,
 
 from datetime import datetime, timezone
 import logging
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from app.api.auth import Authorisation, get_request_context, require_permission
+from app.auth.models import Permission
 
 from app.models.entity import (
     CanonicalEntity,
@@ -154,18 +158,15 @@ else:
     _mention_repository = InMemoryMentionRepository()
     _dependency_repository = InMemoryDependencyRepository()
 
-# Shared meeting repository — imported from the meetings router so that
-# correlation queries see meetings ingested via POST /meetings.
-# This import is deferred to avoid circular-import issues at module load time;
-# get_meeting_repository() is called at request time inside the dependency.
-from app.api.meetings import get_meeting_repository as _get_shared_meeting_repository  # noqa: E402
+# Shared meeting access now flows through the request's tenant-scoped
+# repositories (ctx.repos.meetings); see app/api/auth.py.
 
 
 # ---------------------------------------------------------------------------
 # Dependency injection
 # ---------------------------------------------------------------------------
 
-def get_entity_service() -> EntityService:
+def get_entity_service(ctx: Authorisation = Depends(get_request_context)) -> EntityService:
     """FastAPI dependency that provides a configured EntityService.
 
     Wires in DependencyResolutionService so that dependency extraction runs
@@ -174,18 +175,18 @@ def get_entity_service() -> EntityService:
     from app.services.dependency_resolution_service import DependencyResolutionService
 
     dep_resolution_service = DependencyResolutionService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        dependency_repo=_dependency_repository,
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        dependency_repo=ctx.repos.dependencies,
     )
     return EntityService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
         dependency_resolution_service=dep_resolution_service,
     )
 
 
-def get_candidate_service() -> CandidateService:
+def get_candidate_service(ctx: Authorisation = Depends(get_request_context)) -> CandidateService:
     """FastAPI dependency that provides a configured CandidateService.
 
     Uses the same shared repository singletons as get_entity_service so
@@ -193,13 +194,13 @@ def get_candidate_service() -> CandidateService:
     is stateless and can be shared or recreated freely.
     """
     return CandidateService(
-        mention_repo=_mention_repository,
-        entity_repo=_entity_repository,
+        mention_repo=ctx.repos.mentions,
+        entity_repo=ctx.repos.entities,
         generator=LexicalCandidateGenerator(),
     )
 
 
-def get_candidate_scoring_service() -> CandidateScoringService:
+def get_candidate_scoring_service(ctx: Authorisation = Depends(get_request_context)) -> CandidateScoringService:
     """FastAPI dependency that provides a configured CandidateScoringService.
 
     Uses the same shared repository singletons so all three services see
@@ -209,14 +210,14 @@ def get_candidate_scoring_service() -> CandidateScoringService:
     from app.entity_resolution.lexical_candidate_scorer import LexicalCandidateScorer
 
     return CandidateScoringService(
-        mention_repo=_mention_repository,
-        entity_repo=_entity_repository,
+        mention_repo=ctx.repos.mentions,
+        entity_repo=ctx.repos.entities,
         generator=LexicalCandidateGenerator(),
         scorer=LexicalCandidateScorer(),
     )
 
 
-def get_resolution_service() -> ResolutionService:
+def get_resolution_service(ctx: Authorisation = Depends(get_request_context)) -> ResolutionService:
     """FastAPI dependency that provides a configured ResolutionService.
 
     Uses the same shared repository singletons and a freshly constructed
@@ -227,20 +228,20 @@ def get_resolution_service() -> ResolutionService:
     from app.entity_resolution.resolution_policy import ThresholdResolutionPolicy
 
     scoring_service = CandidateScoringService(
-        mention_repo=_mention_repository,
-        entity_repo=_entity_repository,
+        mention_repo=ctx.repos.mentions,
+        entity_repo=ctx.repos.entities,
         generator=LexicalCandidateGenerator(),
         scorer=LexicalCandidateScorer(),
     )
     return ResolutionService(
-        mention_repo=_mention_repository,
-        entity_repo=_entity_repository,
+        mention_repo=ctx.repos.mentions,
+        entity_repo=ctx.repos.entities,
         scoring_service=scoring_service,
         policy=ThresholdResolutionPolicy(),
     )
 
 
-def get_temporal_state_service() -> TemporalStateService:
+def get_temporal_state_service(ctx: Authorisation = Depends(get_request_context)) -> TemporalStateService:
     """FastAPI dependency that provides a configured TemporalStateService.
 
     Uses the shared entity, mention, and meeting repository singletons plus
@@ -248,15 +249,15 @@ def get_temporal_state_service() -> TemporalStateService:
     All components are stateless and can be recreated freely.
     """
     return TemporalStateService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_correlation_service() -> CorrelationService:
+def get_correlation_service(ctx: Authorisation = Depends(get_request_context)) -> CorrelationService:
     """FastAPI dependency that provides a configured CorrelationService.
 
     Uses the shared entity and mention repository singletons plus the
@@ -265,13 +266,13 @@ def get_correlation_service() -> CorrelationService:
     by other endpoints.
     """
     return CorrelationService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
     )
 
 
-def get_organisational_memory_service() -> OrganisationalMemoryService:
+def get_organisational_memory_service(ctx: Authorisation = Depends(get_request_context)) -> OrganisationalMemoryService:
     """FastAPI dependency that provides a configured OrganisationalMemoryService.
 
     Uses the shared entity, mention, and meeting repository singletons plus
@@ -281,15 +282,15 @@ def get_organisational_memory_service() -> OrganisationalMemoryService:
     All components are stateless and can be recreated freely.
     """
     return OrganisationalMemoryService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_insight_service() -> InsightService:
+def get_insight_service(ctx: Authorisation = Depends(get_request_context)) -> InsightService:
     """FastAPI dependency that provides a configured InsightService.
 
     Uses the shared entity, mention, and meeting repository singletons plus
@@ -299,15 +300,15 @@ def get_insight_service() -> InsightService:
     All components are stateless and can be recreated freely.
     """
     return InsightService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_attention_service() -> AttentionService:
+def get_attention_service(ctx: Authorisation = Depends(get_request_context)) -> AttentionService:
     """FastAPI dependency that provides a configured AttentionService.
 
     Uses the shared entity, mention, and meeting repository singletons plus
@@ -316,67 +317,67 @@ def get_attention_service() -> AttentionService:
     All components are stateless and can be recreated freely.
     """
     return AttentionService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_action_recommendation_service() -> ActionRecommendationService:
+def get_action_recommendation_service(ctx: Authorisation = Depends(get_request_context)) -> ActionRecommendationService:
     """FastAPI dependency that provides a configured ActionRecommendationService.
 
     Uses the shared repository singletons and interpreter/policy.
     """
     return ActionRecommendationService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_unified_timeline_service() -> UnifiedTimelineService:
+def get_unified_timeline_service(ctx: Authorisation = Depends(get_request_context)) -> UnifiedTimelineService:
     """FastAPI dependency that provides a configured UnifiedTimelineService."""
     return UnifiedTimelineService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
     )
 
 
-def get_entity_relationship_service() -> EntityRelationshipService:
+def get_entity_relationship_service(ctx: Authorisation = Depends(get_request_context)) -> EntityRelationshipService:
     """FastAPI dependency that provides a configured EntityRelationshipService."""
     return EntityRelationshipService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        dependency_repo=_dependency_repository,
-        current_revision_lookup=_build_current_revision_lookup(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        dependency_repo=ctx.repos.dependencies,
+        current_revision_lookup=_build_current_revision_lookup(ctx),
     )
 
 
-def get_dependency_graph_service() -> DependencyGraphService:
+def get_dependency_graph_service(ctx: Authorisation = Depends(get_request_context)) -> DependencyGraphService:
     """FastAPI dependency that provides a configured DependencyGraphService."""
     return DependencyGraphService(
-        dependency_repo=_dependency_repository,
-        entity_repo=_entity_repository,
-        current_revision_lookup=_build_current_revision_lookup(),
+        dependency_repo=ctx.repos.dependencies,
+        entity_repo=ctx.repos.entities,
+        current_revision_lookup=_build_current_revision_lookup(ctx),
     )
 
 
-def _build_current_revision_lookup():
+def _build_current_revision_lookup(ctx) -> Callable[[str], Optional[int]]:
     """Return an authoritative meeting source-revision lookup callable.
 
     Callers (relationship / dependency graph / change-intelligence services)
     use it to read only current-revision stamped state so a revision-N record
-    never shapes intelligence as current revision N+1.  Meeting repo access is
-    deferred to request time (avoid startup circular imports).
+    never shapes intelligence as current revision N+1.  The lookup reads
+    through the request's tenant-scoped meeting repository.
     """
-    meeting_repo = _get_shared_meeting_repository()
+    meeting_repo = ctx.repos.meetings
 
     def _lookup(meeting_id):
         if meeting_id is None:
@@ -392,19 +393,19 @@ def _build_current_revision_lookup():
     return _lookup
 
 
-def get_impact_analysis_service() -> ImpactAnalysisService:
+def get_impact_analysis_service(ctx: Authorisation = Depends(get_request_context)) -> ImpactAnalysisService:
     """FastAPI dependency that provides a configured ImpactAnalysisService."""
     return ImpactAnalysisService(
-        entity_repo=_entity_repository,
-        relationship_service=get_entity_relationship_service(),
-        temporal_service=get_temporal_state_service(),
-        insight_service=get_insight_service(),
-        attention_service=get_attention_service(),
-        dependency_graph_service=get_dependency_graph_service(),
+        entity_repo=ctx.repos.entities,
+        relationship_service=get_entity_relationship_service(ctx),
+        temporal_service=get_temporal_state_service(ctx),
+        insight_service=get_insight_service(ctx),
+        attention_service=get_attention_service(ctx),
+        dependency_graph_service=get_dependency_graph_service(ctx),
     )
 
 
-def get_portfolio_intelligence_service():
+def get_portfolio_intelligence_service(ctx: Authorisation = Depends(get_request_context)):
     """FastAPI dependency that provides a configured PortfolioIntelligenceService.
 
     Uses the shared entity, mention, meeting, and dependency repository singletons
@@ -419,12 +420,12 @@ def get_portfolio_intelligence_service():
     from app.services.portfolio_intelligence_service import PortfolioIntelligenceService
 
     return PortfolioIntelligenceService(
-        entity_repo=_entity_repository,
-        mention_repo=_mention_repository,
-        meeting_repo=_get_shared_meeting_repository(),
+        entity_repo=ctx.repos.entities,
+        mention_repo=ctx.repos.mentions,
+        meeting_repo=ctx.repos.meetings,
         interpreter=KeywordStateInterpreter(),
         policy=DefaultTransitionPolicy(),
-        dependency_repo=_dependency_repository,
+        dependency_repo=ctx.repos.dependencies,
     )
 
 
@@ -820,6 +821,7 @@ def _dependency_graph_to_response(
 def register_mention(
     request: RegisterMentionRequest,
     service: EntityService = Depends(get_entity_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_MANAGE)),
 ) -> RegisterMentionResponse:
     """Register a mention and return its resolution status."""
     mention = service.register_mention(
@@ -846,6 +848,7 @@ def register_mention(
 def create_entity(
     request: CreateEntityRequest,
     service: EntityService = Depends(get_entity_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_MANAGE)),
 ) -> EntityResponse:
     """Create (or retrieve) a canonical entity and return it."""
     entity, created = service.create_entity(
@@ -885,6 +888,7 @@ def create_entity(
 def get_mention_candidates(
     mention_id: str,
     service: CandidateService = Depends(get_candidate_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> CandidatesResponse:
     """Return candidate entities for the given mention."""
     try:
@@ -924,6 +928,7 @@ def get_mention_candidates(
 def get_mention_scored_candidates(
     mention_id: str,
     service: CandidateScoringService = Depends(get_candidate_scoring_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> ScoredCandidatesResponse:
     """Return scored candidate entities for the given mention."""
     try:
@@ -966,6 +971,7 @@ def get_mention_scored_candidates(
 def resolve_mention(
     mention_id: str,
     service: ResolutionService = Depends(get_resolution_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_MANAGE)),
 ) -> ResolutionDecisionResponse:
     """Apply the resolution decision engine and return the explainable decision."""
     try:
@@ -993,6 +999,7 @@ def list_entities(
         description="Filter results by entity type.",
     ),
     service: EntityService = Depends(get_entity_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> list[EntityResponse]:
     """Return all entities, optionally filtered by type."""
     domain_type = EntityType(entity_type.value) if entity_type is not None else None
@@ -1036,6 +1043,7 @@ def list_entities(
 def get_entity_insights(
     entity_id: str,
     service: InsightService = Depends(get_insight_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityInsightsResponse:
     """Return derived insights for a canonical entity."""
     from datetime import datetime, timezone
@@ -1076,6 +1084,7 @@ def get_entity_insights(
 def get_entity_attention(
     entity_id: str,
     service: AttentionService = Depends(get_attention_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityAttentionDetailResponse:
     """Return the prioritised attention result for a specific canonical entity."""
     from datetime import datetime, timezone
@@ -1114,6 +1123,7 @@ def get_entity_attention(
 def get_entity_actions(
     entity_id: str,
     service: ActionRecommendationService = Depends(get_action_recommendation_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityActionsResponse:
     """Return the recommended actions for a specific canonical entity."""
     from datetime import datetime, timezone
@@ -1145,6 +1155,7 @@ def get_entity_actions(
 def get_entity_timeline(
     entity_id: str,
     service: UnifiedTimelineService = Depends(get_unified_timeline_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> UnifiedEntityTimelineResponse:
     """Return the unified chronological timeline for a specific canonical entity."""
     from datetime import datetime, timezone
@@ -1192,6 +1203,7 @@ def get_entity_timeline(
 def get_entity_memory(
     entity_id: str,
     service: OrganisationalMemoryService = Depends(get_organisational_memory_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityMemoryResponse:
     """Return the organisational memory record for a canonical entity."""
     try:
@@ -1237,6 +1249,7 @@ def get_entity_memory(
 def get_entity_timeline(
     entity_id: str,
     service: TemporalStateService = Depends(get_temporal_state_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityTimelineResponse:
     """Return the temporal lifecycle timeline for a canonical entity."""
     try:
@@ -1276,6 +1289,7 @@ def get_entity_timeline(
 def get_entity_correlations(
     entity_id: str,
     service: CorrelationService = Depends(get_correlation_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityCorrelationResponse:
     """Return the cross-meeting correlation history for a canonical entity."""
     try:
@@ -1313,6 +1327,7 @@ def get_entity_correlations(
 def get_entity_relationships(
     entity_id: str,
     service: EntityRelationshipService = Depends(get_entity_relationship_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityRelationshipGraphResponse:
     """Return the relationship graph for a specific canonical entity."""
     try:
@@ -1341,6 +1356,7 @@ def get_entity_relationships(
 def get_entity_dependencies(
     entity_id: str,
     service: EntityRelationshipService = Depends(get_entity_relationship_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> list[EntityRelationshipSchema]:
     """Return explicit dependencies for a specific canonical entity."""
     try:
@@ -1386,6 +1402,7 @@ def get_entity_impacts(
     entity_id: str,
     max_depth: int = Query(default=3, ge=1, le=10, description="Max depth for transitive dependencies"),
     service: ImpactAnalysisService = Depends(get_impact_analysis_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityImpactResponse:
     """Return the risk impact associations directed at a canonical entity."""
     current_time = datetime.now(timezone.utc)
@@ -1419,6 +1436,7 @@ def get_entity_dependency_graph(
     entity_id: str,
     max_depth: int = Query(default=3, ge=1, le=10, description="Max depth for dependency traversal"),
     service: DependencyGraphService = Depends(get_dependency_graph_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> DependencyGraphResponse:
     """Return the explicit dependency graph for a specific canonical entity."""
     try:
@@ -1440,6 +1458,7 @@ def get_entity_dependency_graph(
 def get_entity(
     entity_id: str,
     service: EntityService = Depends(get_entity_service),
+    _auth: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
 ) -> EntityResponse:
     """Return a canonical entity by ID or raise HTTP 404."""
     try:

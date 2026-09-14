@@ -683,6 +683,65 @@ Open your browser and navigate to:
 
 ---
 
+### 6. Bootstrap authentication (Stage 24)
+
+Threadline has real authentication, organisations, and tenant isolation.
+While NO users exist, the API serves requests in the bootstrap organisation
+so the first owner can be created. The moment the first user exists,
+anonymous access ends permanently — there is no default password and no
+hardcoded admin.
+
+```bash
+# 1. Create the first organisation + owner (open only while userless)
+curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{"organisation_name": "Acme", "slug": "acme",
+       "admin_email": "owner@acme.example", "password": "choose-a-strong-password"}'
+
+# 2. Log in (failures share one generic message; brute force is throttled)
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "owner@acme.example", "password": "choose-a-strong-password"}'
+# → {"access_token": "<opaque-token>", "token_type": "bearer", "expires_at": "..."}
+
+# 3. Call tenant-scoped endpoints with the bearer token
+curl http://localhost:8000/api/v1/entities \
+  -H "Authorization: Bearer <opaque-token>"
+
+# 4. Users in several organisations select one explicitly (header is
+#    checked against real membership — never trusted blindly)
+curl http://localhost:8000/api/v1/entities \
+  -H "Authorization: Bearer <opaque-token>" \
+  -H "X-Organisation-ID: <organisation_id>"
+
+# 5. Log out (revokes the session server-side)
+curl -X POST http://localhost:8000/api/v1/auth/logout \
+  -H "Authorization: Bearer <opaque-token>"
+```
+
+Roles are `OWNER` / `ADMIN` / `MEMBER` with a central permission policy
+(`app/auth/models.py:ROLE_PERMISSIONS`). Members read/create/query/process;
+member management needs `ADMIN`; renaming an org, disabling users, and
+granting `OWNER` need `OWNER`. Objects outside your organisation read as
+`404` (no cross-tenant existence oracle); unauthenticated calls get `401`.
+
+Security properties worth knowing:
+
+- Passwords: PBKDF2-HMAC-SHA256 (stdlib `hashlib`), per-user salt, 600k
+  iterations by default; only hashes are stored. Sessions are opaque
+  server-side rows (only token hashes persisted) with expiry + revocation.
+- Tenant isolation is enforced at the repository boundary
+  (`app/repositories/scoped_repositories.py`), not just in routes: every
+  read/write/list/search carries the organisation scope, including the
+  background worker (scope comes from the durable job row) and the
+  semantic index (per-record organisation, tenant-filtered vector search).
+- Auth-relevant tunables (`app/core/config.py`, all `AUTH_*` env vars):
+  `AUTH_SESSION_TTL_SECONDS` (86400), `AUTH_PBKDF2_ITERATIONS` (600000),
+  `AUTH_OPEN_BOOTSTRAP` (true — set false to fail closed until bootstrap),
+  `AUTH_RATE_LIMIT_MAX_ATTEMPTS` (5), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (900).
+
+---
+
 ## API Endpoints
 
 ### `GET /health`
