@@ -1,82 +1,147 @@
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, Files, Sparkles, Users } from "lucide-react";
+import { useAuth } from "../../auth/AuthContext";
 import { useOrganisation } from "../../auth/OrganisationContext";
 import { useDocumentTitle } from "../../hooks/useDocumentTitle";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { Card } from "../../components/ui/Card";
-import { canManageMembers } from "../../auth/permissions";
+import type { PortfolioEntitySummary } from "../../types/intelligence";
+import {
+  DASHBOARD_ATTENTION_LIMIT,
+  DASHBOARD_MEETINGS_LIMIT,
+  DASHBOARD_RISKS_LIMIT,
+  useDashboardAttention,
+  useDashboardChanges,
+  useDashboardJobHealth,
+  useDashboardMeetingTitles,
+  useDashboardPortfolio,
+  useEntityDirectory,
+} from "./useDashboard";
+import {
+  displayNameFromEmail,
+  greetingFor,
+  relativeTime,
+  snapshotLine,
+} from "./dashboardFormat";
+import {
+  AttentionSection,
+  ChangesSection,
+  ExploreSection,
+  ProcessingSection,
+  RisksSection,
+  type DiscussedMeeting,
+} from "./DashboardSections";
+import "./dashboard.css";
 
-/* Dashboard (foundation): orientation, not metrics. Real next steps only —
- * no invented statistics, no activity feeds, no charts of nothing. */
+/* Dashboard / organisation home: what needs attention, what changed,
+ * what is processing, and what risks the organisation — all from real
+ * backend intelligence. Sections fail independently; nothing is invented.
+ */
 
-const STEPS = [
-  {
-    to: "/app/meetings",
-    icon: Files,
-    title: "Ingest a meeting",
-    body: "Bring a transcript in. ThreadLine extracts facts, people, and commitments.",
-  },
-  {
-    to: "/app/ask",
-    icon: Sparkles,
-    title: "Ask about your organisation",
-    body: "Questions are answered with cited evidence from your own meetings.",
-  },
-  {
-    to: "/app/settings",
-    icon: Users,
-    title: "Invite your team",
-    body: "Owners and admins add members so the whole organisation is heard.",
-    adminOnly: true,
-  },
-] as const;
+function selectRiskEntities(entities: PortfolioEntitySummary[]): PortfolioEntitySummary[] {
+  const blocked = entities.filter((entity) => entity.current_state === "BLOCKED");
+  const elevated = entities.filter(
+    (entity) =>
+      entity.current_state !== "BLOCKED" &&
+      (entity.risk_level === "CRITICAL" || entity.risk_level === "HIGH") &&
+      entity.impact_count > 0,
+  );
+  const seen = new Set<string>();
+  const ordered: PortfolioEntitySummary[] = [];
+  for (const entity of [...blocked, ...elevated]) {
+    if (seen.has(entity.entity_id)) continue;
+    seen.add(entity.entity_id);
+    ordered.push(entity);
+    if (ordered.length >= DASHBOARD_RISKS_LIMIT) break;
+  }
+  return ordered;
+}
 
 export function DashboardPage(): React.JSX.Element {
   useDocumentTitle("Dashboard");
-  const { current, role } = useOrganisation();
+  const { user } = useAuth();
+  const { current } = useOrganisation();
   const orgName = current?.organisation.name ?? "your organisation";
+
+  const attention = useDashboardAttention();
+  const portfolio = useDashboardPortfolio();
+  const changes = useDashboardChanges();
+  const jobs = useDashboardJobHealth();
+  const directory = useEntityDirectory();
+
+  const changeMeetingIds = useMemo(
+    () =>
+      (changes.data?.changes ?? [])
+        .map((change) => change.meeting_id)
+        .filter((id): id is string => Boolean(id)),
+    [changes.data],
+  );
+  const meetingTitles = useDashboardMeetingTitles(changeMeetingIds);
+
+  const discussed: DiscussedMeeting[] = useMemo(() => {
+    const seen = new Set<string>();
+    const ordered: DiscussedMeeting[] = [];
+    for (const meetingId of changeMeetingIds) {
+      if (seen.has(meetingId)) continue;
+      seen.add(meetingId);
+      ordered.push({ meeting_id: meetingId, title: meetingTitles.get(meetingId) ?? null });
+      if (ordered.length >= DASHBOARD_MEETINGS_LIMIT) break;
+    }
+    return ordered;
+  }, [changeMeetingIds, meetingTitles]);
+
+  const riskEntities = useMemo(
+    () => selectRiskEntities(portfolio.data?.entities ?? []),
+    [portfolio.data],
+  );
+
+  const greetingName = displayNameFromEmail(user?.email);
+  const title = greetingName ? `${greetingFor()}, ${greetingName}` : greetingFor();
+
+  const snapshot =
+    portfolio.data && attention.data
+      ? snapshotLine({
+          totalEntities: portfolio.data.total_entities,
+          attentionCount: attention.data.entity_count,
+          blockedCount: portfolio.data.blocked_entities,
+        })
+      : null;
+
+  const freshness = useMemo(() => {
+    const stamps = [portfolio.data?.evaluated_at, changes.data?.evaluated_at].filter(
+      (stamp): stamp is string => Boolean(stamp),
+    );
+    if (stamps.length === 0) return null;
+    const latest = stamps.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
+    return relativeTime(latest);
+  }, [portfolio.data, changes.data]);
 
   return (
     <div className="tl-page">
       <PageHeader
-        title={`Good to see you — here's ${orgName}`}
-        description="ThreadLine turns your meetings into shared organisational memory: who said what, what was decided, and what needs attention."
+        title={title}
+        description={
+          snapshot
+            ? `Organisation overview for ${orgName} — ${snapshot}.`
+            : `Organisation overview for ${orgName}.`
+        }
+        actions={
+          <Link className="tl-btn tl-btn-primary" to="/app/meetings">
+            Ingest a meeting
+          </Link>
+        }
       />
-      <div className="tl-step-grid">
-        {STEPS.filter((step) => !("adminOnly" in step && step.adminOnly && !canManageMembers(role))).map(
-          (step) => (
-            <Link key={step.to} to={step.to} className="tl-step-card">
-              <span className="tl-step-icon" aria-hidden="true">
-                <step.icon />
-              </span>
-              <span className="tl-step-title">{step.title}</span>
-              <span className="tl-body-secondary">{step.body}</span>
-              <span className="tl-step-go">
-                Open <ArrowRight aria-hidden="true" />
-              </span>
-            </Link>
-          ),
-        )}
+
+      <div className="tl-dash-grid">
+        <AttentionSection query={attention} directory={directory} limit={DASHBOARD_ATTENTION_LIMIT} />
+        <ChangesSection query={changes} directory={directory} meetingTitles={meetingTitles} />
       </div>
-      <Card>
-        <h2 className="tl-section-title">How ThreadLine works</h2>
-        <ol className="tl-how-list">
-          <li>
-            <strong>Meetings in.</strong> Transcripts become durable, revisioned source truth.
-          </li>
-          <li>
-            <strong>Understanding out.</strong> People, issues, dependencies, and risks are
-            resolved deterministically — never guessed.
-          </li>
-          <li>
-            <strong>Memory that answers.</strong> Every answer cites the meeting it came from.
-          </li>
-        </ol>
-        <p className="tl-body-secondary">
-          Everything on this page is scoped to {orgName}. Switching organisations in the
-          header switches the entire workspace — nothing leaks across.
-        </p>
-      </Card>
+
+      <ProcessingSection query={jobs} discussed={discussed} />
+
+      <div className="tl-dash-grid">
+        <RisksSection query={portfolio} entities={riskEntities} />
+        <ExploreSection freshness={freshness} />
+      </div>
     </div>
   );
 }

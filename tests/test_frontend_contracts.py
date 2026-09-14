@@ -98,3 +98,72 @@ def test_frontend_bootstrap_login_me_entities_contract(client):
     entities = client.get("/api/v1/entities", headers=headers)
     assert entities.status_code == 200, entities.text
     assert isinstance(entities.json(), list)
+
+
+def test_dashboard_contract_shapes(client):
+    """Dashboard (Stage 26) reads four endpoints; lock their exact envelopes."""
+    slug = _tag("dash")
+    boot = client.post("/api/v1/auth/bootstrap", json={
+        "organisation_name": f"Dashboard {slug}",
+        "slug": slug,
+        "admin_email": f"{_tag('admin')}@x.io",
+        "password": "strong-password-1",
+    })
+    assert boot.status_code == 201, boot.text
+    data = boot.json()
+    NOW["users"].append(data["user"]["user_id"])
+    NOW["orgs"].append(data["organisation"]["organisation_id"])
+    org_id = data["organisation"]["organisation_id"]
+
+    session = client.post("/api/v1/auth/login", json={
+        "email": data["user"]["email"],
+        "password": "strong-password-1",
+    })
+    assert session.status_code == 200, session.text
+    headers = {
+        "Authorization": f"Bearer {session.json()['access_token']}",
+        "X-Organisation-ID": org_id,
+    }
+
+    # GET /attention → AttentionResponse
+    attention = client.get("/api/v1/attention", headers=headers)
+    assert attention.status_code == 200, attention.text
+    attention_body = attention.json()
+    assert set(attention_body) == {"entity_count", "items"}
+    assert isinstance(attention_body["items"], list)
+
+    # GET /portfolio → OrganisationPortfolioResponse
+    portfolio = client.get("/api/v1/portfolio", headers=headers)
+    assert portfolio.status_code == 200, portfolio.text
+    portfolio_body = portfolio.json()
+    assert set(portfolio_body) == {
+        "total_entities", "critical_entities", "high_risk_entities",
+        "medium_risk_entities", "low_risk_entities",
+        "entities_with_active_actions", "entities_with_impact",
+        "blocked_entities", "entities", "evaluated_at",
+    }
+    assert isinstance(portfolio_body["entities"], list)
+    # For a brand-new org with no observations the portfolio is empty but
+    # the envelope shape is validated above — the dashboard uses this
+    # exact structure for the snapshot line and entity directory.
+
+    # GET /changes (with the dashboard's limit filter) → OrganisationChangesResponse
+    changes = client.get("/api/v1/changes", params={"limit": 8}, headers=headers)
+    assert changes.status_code == 200, changes.text
+    changes_body = changes.json()
+    assert set(changes_body) == {
+        "total_changes", "critical_changes", "high_changes",
+        "medium_changes", "info_changes", "changes", "evaluated_at",
+    }
+    assert isinstance(changes_body["changes"], list)
+
+    # GET /health/jobs → queue health consumed by the processing strip
+    jobs = client.get("/api/v1/health/jobs", headers=headers)
+    assert jobs.status_code == 200, jobs.text
+    jobs_body = jobs.json()
+    assert set(jobs_body) == {
+        "worker_enabled", "counts", "stale_running", "oldest_pending_age_seconds",
+    }
+    assert isinstance(jobs_body["worker_enabled"], bool)
+    assert isinstance(jobs_body["counts"], dict)
+    assert isinstance(jobs_body["stale_running"], int)

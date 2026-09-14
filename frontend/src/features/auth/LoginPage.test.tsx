@@ -59,7 +59,9 @@ describe("login flow", () => {
     await user.click(screen.getByRole("button", { name: /sign in/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /good to see you/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: /good (morning|afternoon|evening), alice/i }),
+      ).toBeInTheDocument();
     });
     expect(seen.authorization).toBe(`Bearer ${TOKEN}`);
     expect(sessionStorage.getItem("tl.session.token")).toBe(TOKEN);
@@ -82,6 +84,8 @@ describe("login flow", () => {
     await waitFor(() => {
       expect(screen.getByText("invalid email or password")).toBeInTheDocument();
     });
-    expect(screen.queryByRole("heading", { name: /good to see you/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /good (morning|afternoon|evening)/i }),
+    ).not.toBeInTheDocument();
   });
 });

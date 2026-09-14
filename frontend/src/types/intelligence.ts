@@ -60,6 +60,10 @@ export interface OrganisationChange {
   source_text: string | null;
   previous_state: string | null;
   current_state: string | null;
+  insight_id: string | null;
+  dependency_path: string[] | null;
+  impact_count: number | null;
+  related_entity_ids: string[];
   evidence: string;
 }
 

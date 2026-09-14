@@ -48,7 +48,9 @@ describe("route guards", () => {
     });
     await waitFor(
       () => {
-        expect(screen.getByRole("heading", { name: /good to see you/i })).toBeInTheDocument();
+        expect(
+          screen.getByRole("heading", { name: /good (morning|afternoon|evening), alice/i }),
+        ).toBeInTheDocument();
       },
       { timeout: 15000 },
     );

@@ -12,6 +12,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -35,6 +36,11 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
   const { user, memberships } = useAuth();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Mirror the live selection so the API client's getter always reads the
+  // current organisation — including between render and passive effects,
+  // where a cache-cleared refetch could otherwise fire without a tenant.
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
 
   // Keep the selection valid against live memberships.
   useEffect(() => {
@@ -56,13 +62,15 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
     if (user && selectedId) writeOrganisationId(user.user_id, selectedId);
   }, [user, selectedId]);
 
-  // Feed the API client with the live selection (hint header only).
+  // Feed the API client with the live selection (hint header only). The
+  // getter is installed once and reads the mirror ref, so organisation
+  // transitions never expose a window where requests lose their scope.
   useEffect(() => {
-    readOrganisationRef.current = () => selectedId;
+    readOrganisationRef.current = () => selectedIdRef.current;
     return () => {
       readOrganisationRef.current = null;
     };
-  }, [selectedId]);
+  }, []);
 
   const select = useCallback(
     (organisationId: string): boolean => {
@@ -70,6 +78,10 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
         (m) => m.status === "ACTIVE" && m.organisation.organisation_id === organisationId,
       );
       if (!known) return false;
+      // Scope the API client to the new organisation synchronously: clearing
+      // the query cache retriggers refetches before React commits this state
+      // change, and those requests must already carry the new tenant header.
+      selectedIdRef.current = organisationId;
       // Organisation switch = new tenant namespace: drop cached server data.
       // Query keys already segment by organisation; clearing removes any
       // lingering per-org entries from the previous selection promptly.

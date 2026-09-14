@@ -36,20 +36,19 @@ describe("organisation switching", () => {
     await waitFor(
       () => {
         expect(
-          screen.getByRole("heading", { name: /good to see you.*alpha/i }),
+          screen.getByRole("heading", { name: /good (morning|afternoon|evening), sam/i }),
         ).toBeInTheDocument();
       },
       headingOptions,
     );
+    expect(screen.getByText(/organisation overview for alpha/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /switch organisation/i }));
     await user.click(await screen.findByRole("menuitem", { name: /beta/i }));
 
     await waitFor(
       () => {
-        expect(
-          screen.getByRole("heading", { name: /good to see you.*beta/i }),
-        ).toBeInTheDocument();
+        expect(screen.getByText(/organisation overview for beta/i)).toBeInTheDocument();
       },
       headingOptions,
     );
@@ -65,10 +64,13 @@ describe("organisation switching", () => {
     });
     await waitFor(
       () => {
-        expect(screen.getByRole("heading", { name: /good to see you.*beta/i })).toBeInTheDocument();
+        expect(
+          screen.getByRole("heading", { name: /good (morning|afternoon|evening), sam/i }),
+        ).toBeInTheDocument();
       },
       { timeout: 15000 },
     );
+    expect(screen.getByText(/organisation overview for beta/i)).toBeInTheDocument();
   });
 
   it("rejects unknown organisations instead of trusting the selection", () => {

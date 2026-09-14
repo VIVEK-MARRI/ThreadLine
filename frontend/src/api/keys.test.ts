@@ -6,6 +6,15 @@ describe("tenant-aware query keys", () => {
     expect(queryKeys.meetings("org-a")).toEqual(["tl", "org-a", "meetings", null]);
     expect(queryKeys.meeting("org-a", "m-1")).toEqual(["tl", "org-a", "meeting", "m-1"]);
     expect(queryKeys.entities("org-a", "ISSUE")).toEqual(["tl", "org-a", "entities", "ISSUE"]);
+    expect(queryKeys.attention("org-a")).toEqual(["tl", "org-a", "attention"]);
+    expect(queryKeys.portfolio("org-a")).toEqual(["tl", "org-a", "portfolio"]);
+    expect(queryKeys.changes("org-a", { limit: 8 })).toEqual([
+      "tl",
+      "org-a",
+      "changes",
+      { limit: 8 },
+    ]);
+    expect(queryKeys.jobs("org-a")).toEqual(["tl", "org-a", "jobs"]);
     expect(queryKeys.queryEvidence("org-a", "status?")).toEqual([
       "tl",
       "org-a",
@@ -25,6 +34,18 @@ describe("tenant-aware query keys", () => {
     );
     expect(JSON.stringify(queryKeys.queryEvidence("org-a", "q"))).not.toBe(
       JSON.stringify(queryKeys.queryEvidence("org-b", "q")),
+    );
+    expect(JSON.stringify(queryKeys.attention("org-a"))).not.toBe(
+      JSON.stringify(queryKeys.attention("org-b")),
+    );
+    expect(JSON.stringify(queryKeys.portfolio("org-a"))).not.toBe(
+      JSON.stringify(queryKeys.portfolio("org-b")),
+    );
+    expect(JSON.stringify(queryKeys.changes("org-a", { limit: 8 }))).not.toBe(
+      JSON.stringify(queryKeys.changes("org-b", { limit: 8 })),
+    );
+    expect(JSON.stringify(queryKeys.jobs("org-a"))).not.toBe(
+      JSON.stringify(queryKeys.jobs("org-b")),
     );
   });
 
