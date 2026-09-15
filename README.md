@@ -742,6 +742,66 @@ Security properties worth knowing:
 
 ---
 
+## Run
+
+**Backend (uvicorn):**
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**Frontend dev server (proxies /api to backend on port 8000):**
+
+```bash
+cd frontend && npm run dev
+```
+
+**Production frontend build:**
+
+```bash
+cd frontend && npm ci && npm run build   # outputs frontend/dist/
+```
+
+**Production backend (same origin via reverse proxy — see DEPLOYMENT.md):**
+
+```bash
+cp .env.example .env                      # set SOURCE_REPOSITORY_BACKEND=database
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+# serve frontend/dist/ with nginx/Caddy; proxy /api/* to :8000
+```
+
+---
+
+## Test
+
+**Backend (898 tests, no LLM key required):**
+
+```bash
+python -m pytest            # full suite
+python -m pytest -q         # quiet summary
+```
+
+**Frontend typecheck:**
+
+```bash
+cd frontend && npx tsc --noEmit
+```
+
+**Frontend unit/route tests (172 tests):**
+
+```bash
+cd frontend && npm test
+```
+
+**End-to-end (26 Playwright Chromium tests, requires backend running on :8000):**
+
+```bash
+cd frontend && npx playwright install chromium
+npm run test:e2e
+```
+
+---
+
 ## API Endpoints
 
 ### `GET /health`
