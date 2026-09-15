@@ -5,7 +5,7 @@
  */
 
 import type { ReactNode } from "react";
-import { Navigate, useLocation } from "react-router-dom";
+import { Link, Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { useOrganisation } from "./OrganisationContext";
 import { roleAtLeast } from "./permissions";
@@ -97,9 +97,9 @@ function GuardMessage({
       <h1 className="tl-title">{title}</h1>
       <p className="tl-body-secondary">{body}</p>
       {action ? (
-        <a className="tl-btn tl-btn-primary" href={action.to}>
+        <Link className="tl-btn tl-btn-primary" to={action.to}>
           {action.label}
-        </a>
+        </Link>
       ) : null}
     </div>
   );

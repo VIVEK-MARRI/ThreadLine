@@ -76,7 +76,8 @@ export function MeetingDetailPage(): React.JSX.Element {
 
   if (detail.isError) {
     const unavailable =
-      detail.error instanceof ApiError && detail.error.kind === "not-found";
+      detail.error instanceof ApiError &&
+      (detail.error.kind === "not-found" || detail.error.kind === "forbidden");
     return (
       <div className="tl-page">
         <PageHeader

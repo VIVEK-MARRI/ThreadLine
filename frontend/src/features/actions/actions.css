@@ -1,0 +1,59 @@
+/* Actions follow-up paths: a calm, read-only directory of entities that the
+ * portfolio backend already associates with recommended actions. Rows use
+ * borders rather than cards; exact recommendations remain on entity pages.
+ */
+
+.tl-action-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tl-action-list > li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--tl-space-md);
+  padding: var(--tl-space-md) var(--tl-space-sm);
+  margin: 0 calc(-1 * var(--tl-space-sm));
+  border-bottom: 1px solid var(--tl-line);
+  border-radius: var(--tl-radius-sm);
+}
+
+.tl-action-list > li:first-child {
+  border-top: 1px solid var(--tl-line);
+}
+
+.tl-action-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.tl-action-title {
+  color: var(--tl-ink);
+  font-size: var(--tl-text-body-size);
+  font-weight: 600;
+  line-height: var(--tl-text-body-leading);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+a.tl-action-title:hover {
+  color: var(--tl-primary-700);
+  text-decoration: underline;
+}
+
+.tl-action-meta {
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+  line-height: var(--tl-text-secondary-leading);
+  overflow-wrap: anywhere;
+}
+
+.tl-action-loading {
+  padding: var(--tl-space-sm) 0;
+}

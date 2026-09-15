@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   BarChart3,
   Building2,
@@ -36,7 +36,15 @@ export function AppShell(): React.JSX.Element {
   const { user, logout } = useAuth();
   const { organisations, current, role, select } = useOrganisation();
   const navigate = useNavigate();
+  const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  function handleSelectOrganisation(organisationId: string): void {
+    if (!select(organisationId)) return;
+    // Query filters are tenant-scoped UI state. Keep the destination route,
+    // but do not carry one organisation’s filters into another organisation.
+    if (location.search) navigate(location.pathname, { replace: true });
+  }
 
   async function handleLogout(): Promise<void> {
     await logout();
@@ -106,7 +114,7 @@ export function AppShell(): React.JSX.Element {
               description: `${m.role} · ${m.organisation.slug}`,
             }))}
           onSelect={(id) => {
-            select(id);
+            handleSelectOrganisation(id);
           }}
         />
 
@@ -153,7 +161,7 @@ export function AppShell(): React.JSX.Element {
         ) : null}
         <aside
           className={["tl-drawer", drawerOpen ? "tl-drawer-open" : ""].join(" ")}
-          aria-label="Application"
+          aria-label="Mobile navigation"
           aria-hidden={!drawerOpen}
           inert={!drawerOpen}
         >
