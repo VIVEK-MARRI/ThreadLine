@@ -30,6 +30,8 @@ export const queryKeys = {
     ["tl", scope(organisationId), "meetings", filters ?? null] as const,
   meeting: (organisationId: string, meetingId: string) =>
     ["tl", scope(organisationId), "meeting", meetingId] as const,
+  meetingSection: (organisationId: string, meetingId: string, section: string) =>
+    ["tl", scope(organisationId), "meeting", meetingId, section] as const,
   entities: (organisationId: string, entityType?: string | null) =>
     ["tl", scope(organisationId), "entities", entityType ?? null] as const,
   entity: (organisationId: string, entityId: string) =>

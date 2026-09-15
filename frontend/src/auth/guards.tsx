@@ -14,21 +14,28 @@ import type { Role } from "../types/auth";
 export function RequireAuth({ children }: { children: ReactNode }): React.JSX.Element {
   const { status } = useAuth();
   const location = useLocation();
+  // Preserve the full path including search params so shareable filtered
+  // URLs survive the guard round-trip (e.g. fresh load → select org → back).
+  const from = `${location.pathname}${location.search}`;
 
   if (status === "loading") return <GuardSplash label="Checking your session…" />;
   if (status === "bootstrap") {
-    return <Navigate to="/setup" replace state={{ from: location.pathname }} />;
+    return <Navigate to="/setup" replace state={{ from }} />;
   }
   if (status !== "authenticated") {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    return <Navigate to="/login" replace state={{ from }} />;
   }
   return <>{children}</>;
 }
 
 export function RequireOrganisation({ children }: { children: ReactNode }): React.JSX.Element {
-  const { organisationId, organisations } = useOrganisation();
+  const { organisationId, organisations, selectionResolved } = useOrganisation();
   const location = useLocation();
 
+  // Wait for the stored/auto selection before deciding: redirecting on the
+  // transient unresolved render would unmount the destination page and
+  // bounce back, dropping local state and refetching everything.
+  if (!selectionResolved) return <GuardSplash label="Choosing your organisation…" />;
   if (organisationId) return <>{children}</>;
   if (organisations.length === 0) {
     return (
@@ -39,7 +46,13 @@ export function RequireOrganisation({ children }: { children: ReactNode }): Reac
       />
     );
   }
-  return <Navigate to="/app/select-organisation" replace state={{ from: location.pathname }} />;
+  return (
+    <Navigate
+      to="/app/select-organisation"
+      replace
+      state={{ from: `${location.pathname}${location.search}` }}
+    />
+  );
 }
 
 export function RequireRole({

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  canCreateMeeting,
   canGrantOwner,
   canManageMembers,
   canManageOrganisation,
   canManageRoles,
+  canReadMeeting,
+  canRunMeetingProcessing,
+  canUpdateMeeting,
   canViewDiagnostics,
   roleAtLeast,
 } from "./permissions";
@@ -31,5 +35,18 @@ describe("frontend role hints", () => {
     expect(canGrantOwner("OWNER")).toBe(true);
     expect(canManageOrganisation("ADMIN")).toBe(false);
     expect(canManageOrganisation("OWNER")).toBe(true);
+  });
+
+  it("matches backend meeting permissions for every authenticated role", () => {
+    for (const role of ["MEMBER", "ADMIN", "OWNER"] as const) {
+      expect(canCreateMeeting(role)).toBe(true);
+      expect(canReadMeeting(role)).toBe(true);
+      expect(canUpdateMeeting(role)).toBe(true);
+      expect(canRunMeetingProcessing(role)).toBe(true);
+    }
+    expect(canCreateMeeting(null)).toBe(false);
+    expect(canReadMeeting(null)).toBe(false);
+    expect(canUpdateMeeting(null)).toBe(false);
+    expect(canRunMeetingProcessing(null)).toBe(false);
   });
 });

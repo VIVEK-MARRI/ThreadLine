@@ -44,3 +44,19 @@ export interface ResolutionDecision {
   entity_id: string | null;
   reason?: string;
 }
+
+export type EntityRelationshipType = "CO_OCCURS_WITH" | "DEPENDS_ON" | "BLOCKS" | "RELATED_TO";
+
+export interface EntityRelationship {
+  relationship_id: string;
+  source_entity_id: string;
+  target_entity_id: string;
+  relationship_type: EntityRelationshipType;
+  evidence_type: string;
+  evidence: string;
+  related_meeting_ids: string[];
+  source_text: string | null;
+  mention_id: string | null;
+  strength: number;
+  deterministic_sort_key: string;
+}

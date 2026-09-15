@@ -3,6 +3,7 @@
 import { request } from "./client";
 import type {
   CreateEntityRequest,
+  EntityRelationship,
   EntityResponse,
   EntityType,
   RegisterMentionRequest,
@@ -18,6 +19,12 @@ export const entitiesApi = {
 
   get(entityId: string): Promise<EntityResponse> {
     return request<EntityResponse>(`/api/v1/entities/${encodeURIComponent(entityId)}`);
+  },
+
+  dependencies(entityId: string): Promise<EntityRelationship[]> {
+    return request<EntityRelationship[]>(
+      `/api/v1/entities/${encodeURIComponent(entityId)}/dependencies`,
+    );
   },
 
   create(payload: CreateEntityRequest): Promise<EntityResponse> {

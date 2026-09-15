@@ -37,3 +37,37 @@ def test_meeting_upsert_preserves_identity(tmp_path):
     updated = meeting().model_copy(update={"title": "Payments Review", "source_revision": 2})
     repository.save(updated)
     assert repository.get_by_id("m1").title == "Payments Review"
+
+
+def test_sqlite_meeting_list_is_tenant_scoped_newest_first_and_bounded(tmp_path):
+    repository = SQLiteMeetingRepository(SQLiteSourceStore(tmp_path / "source.db"))
+    older = meeting("persist-older").model_copy(
+        update={
+            "meeting_date": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "organisation_id": "org-a",
+        }
+    )
+    newer = meeting("persist-newer").model_copy(
+        update={
+            "meeting_date": datetime(2026, 2, 1, tzinfo=timezone.utc),
+            "organisation_id": "org-a",
+        }
+    )
+    foreign = meeting("persist-foreign").model_copy(
+        update={
+            "meeting_date": datetime(2026, 3, 1, tzinfo=timezone.utc),
+            "organisation_id": "org-b",
+        }
+    )
+    repository.save(older)
+    repository.save(newer)
+    repository.save(foreign)
+
+    assert [
+        stored.meeting_id
+        for stored in repository.list_meetings(organisation_id="org-a")
+    ] == ["persist-newer", "persist-older"]
+    assert [
+        stored.meeting_id
+        for stored in repository.list_meetings(organisation_id="org-a", limit=1)
+    ] == ["persist-newer"]

@@ -26,6 +26,8 @@ export interface OrganisationContextValue {
   current: OrganisationMembershipView | null;
   organisationId: string | null;
   role: Role | null;
+  /** True once the stored/auto selection has been resolved for the current user. */
+  selectionResolved: boolean;
   /** Switch to one of the user's own organisations. Returns false if unknown. */
   select: (organisationId: string) => boolean;
 }
@@ -36,6 +38,7 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
   const { user, memberships } = useAuth();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectionResolved, setSelectionResolved] = useState(false);
   // Mirror the live selection so the API client's getter always reads the
   // current organisation — including between render and passive effects,
   // where a cache-cleared refetch could otherwise fire without a tenant.
@@ -46,15 +49,20 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
   useEffect(() => {
     if (!user) {
       setSelectedId(null);
+      setSelectionResolved(false);
       return;
     }
     const active = memberships.filter((m) => m.status === "ACTIVE");
     const stored = readOrganisationId(user.user_id);
     if (stored && active.some((m) => m.organisation.organisation_id === stored)) {
       setSelectedId((current) => (current === stored ? current : stored));
-      return;
+    } else {
+      setSelectedId(active[0]?.organisation.organisation_id ?? null);
     }
-    setSelectedId(active[0]?.organisation.organisation_id ?? null);
+    // Mark resolved in the same commit: guards must never redirect on the
+    // transient (memberships present, selection not yet applied) render —
+    // that redirect unmounts the page, drops local state, and refetches.
+    setSelectionResolved(true);
   }, [user, memberships]);
 
   // Persist a valid selection for this user only.
@@ -104,9 +112,10 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
       current,
       organisationId: current?.organisation.organisation_id ?? null,
       role: current?.role ?? null,
+      selectionResolved,
       select,
     }),
-    [memberships, current, select],
+    [memberships, current, selectionResolved, select],
   );
 
   return <OrganisationContext.Provider value={value}>{children}</OrganisationContext.Provider>;

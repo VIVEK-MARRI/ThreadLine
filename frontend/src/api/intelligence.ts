@@ -23,6 +23,7 @@ export const intelligenceApi = {
     change_type?: string;
     severity?: string;
     entity_id?: string;
+    meeting_id?: string;
     limit?: number;
   }): Promise<ChangesResponse> {
     return request<ChangesResponse>("/api/v1/changes", { query: params });

@@ -4,7 +4,7 @@
 - FastAPI + SQLAlchemy. Run the full suite:
   `python -m pytest` (everything, incl. security contract tests)
 - Fast special-case runs that gate a stage (short and deterministic):
-  `python -m pytest tests/test_security_contracts.py tests/quick_contracts.py -q`
+  `python -m pytest tests/test_stage_24_security.py tests/test_frontend_contracts.py -q`
 - Boot for manual QA:
   `python -m uvicorn app.main:app --port 8000`
 - All API paths are versioned under `/api/v1`. Remote first-run is open

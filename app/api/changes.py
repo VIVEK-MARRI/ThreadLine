@@ -27,6 +27,7 @@ GET /api/v1/changes supports optional query parameters for filtering:
   - change_type: Only return changes of this type.
   - severity:    Only return changes at this severity level.
   - entity_id:   Only return changes for this specific entity.
+  - meeting_id:  Only return changes attributed to this specific meeting.
   - start_date:  Only return changes with detected_at >= start_date (ISO 8601).
   - end_date:    Only return changes with detected_at <= end_date (ISO 8601).
   - limit:       Maximum number of changes to return (1-1000).
@@ -181,6 +182,10 @@ def get_changes(
         default=None,
         description="Filter to only return changes for this specific entity.",
     ),
+    meeting_id: Optional[str] = Query(
+        default=None,
+        description="Filter to only return changes attributed to this meeting.",
+    ),
     start_date: Optional[datetime] = Query(
         default=None,
         description="Only return changes with detected_at >= start_date (ISO 8601, UTC).",
@@ -217,6 +222,7 @@ def get_changes(
         change_type=domain_change_type,
         severity=domain_severity,
         entity_id=entity_id,
+        meeting_id=meeting_id,
         start_date=start_date,
         end_date=end_date,
         limit=limit,

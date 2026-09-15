@@ -7,7 +7,7 @@ ExtractionService.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.models.background_job import BackgroundJobType
 
 from app.api.auth import Authorisation, get_request_context, require_permission
@@ -43,12 +43,20 @@ from app.schemas.extraction import (
     TaskSchema,
 )
 from app.schemas.meeting import (
+    MeetingExtractionResponse,
     MeetingIngestRequest,
     MeetingIngestResponse,
+    MeetingListResponse,
+    MeetingMentionSchema,
+    MeetingMentionsResponse,
+    MeetingProcessingResponse,
+    MeetingProcessingStatusSchema,
     MeetingResponse,
+    MeetingSummarySchema,
 )
 from app.services.extraction_service import ExtractionService, MeetingNotFoundError
 from app.services.meeting_service import MeetingConflictError, MeetingService
+from app.services.processing_consistency_service import get_consistency_status
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +215,83 @@ def _extraction_to_response(result) -> ExtractionResponse:
     )
 
 
+def _current_revision_lookup(meeting_repository):
+    """Return a tenant-scoped authoritative source-revision lookup.
+
+    Local to this router to avoid a circular import with app.api.entities.
+    """
+
+    def _lookup(meeting_id):
+        if meeting_id is None:
+            return None
+        meeting = meeting_repository.get_by_id(meeting_id)
+        if meeting is None:
+            return None
+        try:
+            return int(getattr(meeting, "source_revision", 1) or 1)
+        except (TypeError, ValueError):
+            return None
+
+    return _lookup
+
+
+def _processing_response(meeting_id, source_revision, consistency) -> MeetingProcessingResponse:
+    """Translate durable consistency state to the public processing contract."""
+    return MeetingProcessingResponse(
+        meeting_id=meeting_id,
+        source_revision=int(source_revision or 1),
+        status=MeetingProcessingStatusSchema(consistency["status"]),
+        processing_complete=bool(consistency["processing_complete"]),
+        is_current=bool(consistency["is_current"]),
+        extraction_revision=consistency["extraction_revision"],
+        derived_revision=consistency["derived_revision"],
+        semantic_revision=consistency["semantic_revision"],
+        stale_mentions=int(consistency["stale_mentions"] or 0),
+        worker_enabled=settings.background_worker_enabled,
+    )
+
+
+def _meeting_consistency(meeting_id, ctx) -> dict:
+    """Return tenant-scoped durable processing state for one meeting."""
+    return get_consistency_status(
+        meeting_id,
+        meeting_repository=ctx.repos.meetings,
+        job_repository=ctx.repos.jobs,
+        extraction_repository=ctx.repos.extractions,
+        mention_repository=ctx.repos.mentions,
+        semantic_repository=ctx.repos.semantic,
+    )
+
+
+def _meeting_summary(meeting, ctx) -> MeetingSummarySchema:
+    """Project one tenant-scoped meeting into its bounded list record."""
+    extraction = ctx.repos.extractions.get_by_meeting_id(meeting.meeting_id)
+    consistency = _meeting_consistency(meeting.meeting_id, ctx)
+    mentions = ctx.repos.mentions.list_current_by_meeting_id(
+        meeting.meeting_id, _current_revision_lookup(ctx.repos.meetings)
+    )
+    resolved_entity_ids = sorted(
+        {mention.entity_id for mention in mentions if mention.entity_id is not None}
+    )
+    return MeetingSummarySchema(
+        meeting_id=meeting.meeting_id,
+        title=meeting.title,
+        meeting_date=meeting.meeting_date,
+        participants=meeting.participants,
+        ingested_at=meeting.ingested_at,
+        source_revision=int(meeting.source_revision or 1),
+        processing_status=MeetingProcessingStatusSchema(consistency["status"]),
+        extraction_revision=consistency["extraction_revision"],
+        extracted_at=extraction.extracted_at if extraction is not None else None,
+        issue_count=len(extraction.issues) if extraction is not None else 0,
+        task_count=len(extraction.tasks) if extraction is not None else 0,
+        decision_count=len(extraction.decisions) if extraction is not None else 0,
+        risk_count=len(extraction.risks) if extraction is not None else 0,
+        mention_count=len(mentions),
+        resolved_entity_count=len(resolved_entity_ids),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -251,6 +336,40 @@ def ingest_meeting(
 
 
 @router.get(
+    "",
+    response_model=MeetingListResponse,
+    summary="List meetings for the current organisation",
+    description=(
+        "Return tenant-scoped meeting summaries newest first, with durable "
+        "processing state and stored extraction counts. The full transcript "
+        "is omitted here; GET /meetings/{meeting_id} remains authoritative. "
+        "The response is bounded by limit and reports whether more meetings exist."
+    ),
+)
+def list_meetings(
+    limit: int = Query(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum meeting summaries to return (1-200).",
+    ),
+    service: MeetingService = Depends(get_meeting_service),
+    ctx: Authorisation = Depends(require_permission(Permission.MEETING_READ)),
+) -> MeetingListResponse:
+    """Return a bounded, tenant-scoped meeting workspace list."""
+    meetings = service.list_meetings(limit=limit + 1)
+    has_more = len(meetings) > limit
+    selected = meetings[:limit]
+    summaries = [_meeting_summary(meeting, ctx) for meeting in selected]
+    return MeetingListResponse(
+        meetings=summaries,
+        limit=limit,
+        returned_count=len(summaries),
+        has_more=has_more,
+    )
+
+
+@router.get(
     "/{meeting_id}",
     response_model=MeetingResponse,
     summary="Retrieve a meeting by ID",
@@ -269,6 +388,108 @@ def get_meeting(
             detail=f"Meeting '{meeting_id}' not found.",
         )
     return _meeting_to_response(meeting)
+
+
+@router.get(
+    "/{meeting_id}/extraction",
+    response_model=MeetingExtractionResponse,
+    summary="Retrieve the stored extraction for a meeting",
+    description=(
+        "Return the latest stored extraction without running providers or "
+        "mutating source truth. Absence is reported as has_extraction=false, "
+        "not as an error."
+    ),
+)
+def get_meeting_extraction(
+    meeting_id: str,
+    meeting_service: MeetingService = Depends(get_meeting_service),
+    extraction_service: ExtractionService = Depends(get_extraction_service),
+    _ctx: Authorisation = Depends(require_permission(Permission.MEETING_READ)),
+) -> MeetingExtractionResponse:
+    """Return stored extraction for a tenant-scoped meeting."""
+    if meeting_service.get_meeting(meeting_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Meeting '{meeting_id}' not found.",
+        )
+    result = extraction_service.get_extraction_result(meeting_id)
+    return MeetingExtractionResponse(
+        meeting_id=meeting_id,
+        has_extraction=result is not None,
+        extraction=_extraction_to_response(result) if result is not None else None,
+    )
+
+
+@router.get(
+    "/{meeting_id}/processing",
+    response_model=MeetingProcessingResponse,
+    summary="Retrieve durable processing state for a meeting",
+    description=(
+        "Return the durable source/extraction/job/semantic consistency state "
+        "for the current source revision. No percentages are invented: the "
+        "status vocabulary is CURRENT, PENDING, INCOMPLETE, FAILED, or STALE."
+    ),
+)
+def get_meeting_processing(
+    meeting_id: str,
+    service: MeetingService = Depends(get_meeting_service),
+    ctx: Authorisation = Depends(require_permission(Permission.MEETING_READ)),
+) -> MeetingProcessingResponse:
+    """Return tenant-scoped processing state for one meeting."""
+    meeting = service.get_meeting(meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Meeting '{meeting_id}' not found.",
+        )
+    consistency = _meeting_consistency(meeting_id, ctx)
+    return _processing_response(meeting_id, meeting.source_revision, consistency)
+
+
+@router.get(
+    "/{meeting_id}/mentions",
+    response_model=MeetingMentionsResponse,
+    summary="Retrieve current-revision mentions for a meeting",
+    description=(
+        "Return tenant-scoped entity mentions stamped with the meeting's "
+        "current source revision. Older or future revisions are excluded so "
+        "past observations never masquerade as current."
+    ),
+)
+def get_meeting_mentions(
+    meeting_id: str,
+    service: MeetingService = Depends(get_meeting_service),
+    ctx: Authorisation = Depends(require_permission(Permission.ENTITY_READ)),
+) -> MeetingMentionsResponse:
+    """Return tenant-scoped current mentions for one meeting."""
+    if service.get_meeting(meeting_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Meeting '{meeting_id}' not found.",
+        )
+    mentions = ctx.repos.mentions.list_current_by_meeting_id(
+        meeting_id, _current_revision_lookup(ctx.repos.meetings)
+    )
+    mentions.sort(key=lambda mention: (mention.created_at, mention.mention_id))
+    schemas = [
+        MeetingMentionSchema(
+            mention_id=mention.mention_id,
+            meeting_id=mention.meeting_id,
+            entity_type=mention.entity_type.value,
+            text=mention.text,
+            source_text=mention.source_text,
+            entity_id=mention.entity_id,
+            resolution_status=mention.resolution_status.value,
+            source_revision=int(mention.source_revision or 1),
+        )
+        for mention in mentions
+    ]
+    return MeetingMentionsResponse(
+        meeting_id=meeting_id,
+        mention_count=len(schemas),
+        resolved_mention_count=sum(1 for mention in schemas if mention.entity_id is not None),
+        mentions=schemas,
+    )
 
 
 @router.put(

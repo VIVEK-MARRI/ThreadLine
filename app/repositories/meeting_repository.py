@@ -33,6 +33,20 @@ class AbstractMeetingRepository(ABC):
         """
         ...
 
+    @abstractmethod
+    def list_meetings(
+        self,
+        organisation_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[Meeting]:
+        """Return meetings newest first by meeting_date, then meeting_id.
+
+        When organisation_id is given, only that organisation's meetings are
+        returned. None preserves the legacy global enumeration. A positive
+        limit bounds the returned rows; None means no repository-level bound.
+        """
+        ...
+
 
 class InMemoryMeetingRepository(AbstractMeetingRepository):
     """Thread-unsafe in-memory store, suitable for development and testing.
@@ -66,3 +80,17 @@ class InMemoryMeetingRepository(AbstractMeetingRepository):
     def get_by_id(self, meeting_id: str) -> Optional[Meeting]:
         """Return the meeting with the given ID, or None."""
         return self._store.get(meeting_id)
+
+    def list_meetings(
+        self,
+        organisation_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[Meeting]:
+        """Return meetings newest first, optionally scoped and bounded."""
+        meetings = list(self._store.values())
+        if organisation_id is not None:
+            meetings = [meeting for meeting in meetings if meeting.organisation_id == organisation_id]
+        meetings.sort(key=lambda meeting: (-meeting.meeting_date.timestamp(), meeting.meeting_id))
+        if limit is not None:
+            return meetings[: max(0, limit)]
+        return meetings

@@ -1212,3 +1212,32 @@ def test_c52_get_changes_with_limit(test_client) -> None:
     data = resp.json()
 
     assert len(data["changes"]) <= 1
+
+
+def test_c53_get_changes_with_meeting_id_filter() -> None:
+    """Meeting-scoped change detection keeps only that meeting's changes."""
+    first = _make_meeting("filter-first", _RECENT - timedelta(hours=2))
+    second = _make_meeting("filter-second", _RECENT - timedelta(hours=1))
+    entity = _make_entity("filter-entity", "filter service")
+    first_mention = _make_mention(
+        "filter-mention-first", "filter-entity", "filter-first", "filter service is open"
+    )
+    second_mention = _make_mention(
+        "filter-mention-second",
+        "filter-entity",
+        "filter-second",
+        "filter service is blocked",
+    )
+    service = _build_service(
+        [entity], [first, second], [first_mention, second_mention]
+    )
+
+    detected = service.get_changes(current_time=_BASE_TIME)
+    target = next(change.meeting_id for change in detected if change.meeting_id)
+    filtered = service.get_changes(current_time=_BASE_TIME, meeting_id=target)
+
+    assert filtered, "expected at least one change for the filtered meeting"
+    assert {change.meeting_id for change in filtered} == {target}
+    assert [change.change_id for change in filtered] == [
+        change.change_id for change in detected if change.meeting_id == target
+    ]

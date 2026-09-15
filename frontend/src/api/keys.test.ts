@@ -4,7 +4,20 @@ import { queryKeys } from "./keys";
 describe("tenant-aware query keys", () => {
   it("namespaces every resource key by organisation", () => {
     expect(queryKeys.meetings("org-a")).toEqual(["tl", "org-a", "meetings", null]);
+    expect(queryKeys.meetings("org-a", { limit: 50 })).toEqual([
+      "tl",
+      "org-a",
+      "meetings",
+      { limit: 50 },
+    ]);
     expect(queryKeys.meeting("org-a", "m-1")).toEqual(["tl", "org-a", "meeting", "m-1"]);
+    expect(queryKeys.meetingSection("org-a", "m-1", "processing")).toEqual([
+      "tl",
+      "org-a",
+      "meeting",
+      "m-1",
+      "processing",
+    ]);
     expect(queryKeys.entities("org-a", "ISSUE")).toEqual(["tl", "org-a", "entities", "ISSUE"]);
     expect(queryKeys.attention("org-a")).toEqual(["tl", "org-a", "attention"]);
     expect(queryKeys.portfolio("org-a")).toEqual(["tl", "org-a", "portfolio"]);
@@ -31,6 +44,12 @@ describe("tenant-aware query keys", () => {
     expect(a).not.toBe(b);
     expect(JSON.stringify(queryKeys.entity("org-a", "e-1"))).not.toBe(
       JSON.stringify(queryKeys.entity("org-b", "e-1")),
+    );
+    expect(JSON.stringify(queryKeys.meeting("org-a", "m-1"))).not.toBe(
+      JSON.stringify(queryKeys.meeting("org-b", "m-1")),
+    );
+    expect(JSON.stringify(queryKeys.meetingSection("org-a", "m-1", "processing"))).not.toBe(
+      JSON.stringify(queryKeys.meetingSection("org-b", "m-1", "processing")),
     );
     expect(JSON.stringify(queryKeys.queryEvidence("org-a", "q"))).not.toBe(
       JSON.stringify(queryKeys.queryEvidence("org-b", "q")),

@@ -33,3 +33,24 @@ export function canManageOrganisation(role: Role | null): boolean {
 export function canViewDiagnostics(role: Role | null): boolean {
   return roleAtLeast(role, "ADMIN");
 }
+
+/* Meeting-workspace affordances mirror backend ROLE_PERMISSIONS today:
+ * MEMBER, ADMIN, and OWNER all hold MEETING_CREATE/READ/UPDATE and
+ * PROCESSING_RUN. These helpers keep that assumption in one tested place;
+ * the backend remains authoritative if the policy ever changes.
+ */
+export function canCreateMeeting(role: Role | null): boolean {
+  return role !== null;
+}
+
+export function canReadMeeting(role: Role | null): boolean {
+  return role !== null;
+}
+
+export function canUpdateMeeting(role: Role | null): boolean {
+  return role !== null;
+}
+
+export function canRunMeetingProcessing(role: Role | null): boolean {
+  return role !== null;
+}

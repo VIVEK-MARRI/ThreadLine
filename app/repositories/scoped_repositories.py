@@ -101,6 +101,15 @@ class ScopedMeetingRepository(AbstractMeetingRepository):
             return None
         return meeting
 
+    def list_meetings(
+        self,
+        organisation_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[Meeting]:
+        # The scope always wins over a caller-supplied filter: tenant scope
+        # is a security property, not a caller preference.
+        return self._inner.list_meetings(self.organisation_id, limit=limit)
+
 
 class ScopedExtractionRepository(AbstractExtractionRepository):
     def __init__(self, inner: AbstractExtractionRepository, organisation_id: str) -> None:

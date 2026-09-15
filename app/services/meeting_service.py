@@ -67,6 +67,12 @@ class MeetingService:
         """Return a meeting by ID, or None if it does not exist."""
         return self._repository.get_by_id(meeting_id)
 
+    def list_meetings(self, limit: Optional[int] = None) -> list[Meeting]:
+        """Return meetings newest first, bounded when limit is positive."""
+        if limit is not None and limit <= 0:
+            return []
+        return self._repository.list_meetings(limit=limit)
+
     def revise_meeting(self, meeting_id: str, request: MeetingIngestRequest) -> Meeting:
         """Create the next authoritative source revision for a meeting."""
         existing = self._repository.get_by_id(meeting_id)

@@ -307,6 +307,7 @@ class OrganisationChangeIntelligenceService:
         change_type: Optional[OrganisationChangeType] = None,
         severity: Optional[OrganisationChangeSeverity] = None,
         entity_id: Optional[str] = None,
+        meeting_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> list[OrganisationChange]:
         """Detect and return all organisation-wide changes.
@@ -339,6 +340,8 @@ class OrganisationChangeIntelligenceService:
             Only return changes at this severity level.
         entity_id:
             Only return changes for this specific entity.
+        meeting_id:
+            Only return changes attributed to this specific meeting.
         limit:
             Maximum number of changes to return. None means no limit.
 
@@ -409,6 +412,9 @@ class OrganisationChangeIntelligenceService:
 
         if severity is not None:
             filtered = [c for c in filtered if c.severity == severity]
+
+        if meeting_id is not None:
+            filtered = [c for c in filtered if c.meeting_id == meeting_id]
 
         # Sort deterministically.
         filtered = _sort_changes(filtered)

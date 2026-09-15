@@ -138,6 +138,23 @@ class SQLiteMeetingRepository(AbstractMeetingRepository):
         ).fetchone()
         return Meeting.model_validate_json(row[0]) if row else None
 
+    def list_meetings(
+        self,
+        organisation_id: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[Meeting]:
+        query = "SELECT payload FROM meetings"
+        args: list[object] = []
+        if organisation_id is not None:
+            query += " WHERE organisation_id = ?"
+            args.append(organisation_id)
+        query += " ORDER BY meeting_date DESC, meeting_id ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            args.append(max(0, limit))
+        rows = self._store._connection.execute(query, tuple(args)).fetchall()
+        return [Meeting.model_validate_json(row[0]) for row in rows]
+
 
 class SQLiteExtractionRepository(AbstractExtractionRepository):
     def __init__(self, store: SQLiteSourceStore) -> None:

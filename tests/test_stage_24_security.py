@@ -273,6 +273,21 @@ def test_s24_authorization_role_matrix(client):
     assert client.get("/api/v1/entities", headers=member_headers).status_code == 200
     assert client.post("/api/v1/query/evidence", json={"question": "status update?"},
                        headers=member_headers).status_code == 200
+    member_meeting = client.post("/api/v1/meetings", json={
+        "meeting_id": _tag("member-meeting"), "title": "Member Sync",
+        "transcript": "Member workspace smoke transcript.",
+        "meeting_date": "2026-01-01T10:00:00Z", "participants": []},
+        headers=member_headers)
+    assert member_meeting.status_code == 201, member_meeting.text
+    member_meeting_id = member_meeting.json()["meeting_id"]
+    assert client.get("/api/v1/meetings", headers=member_headers).status_code == 200
+    assert client.get(f"/api/v1/meetings/{member_meeting_id}", headers=member_headers).status_code == 200
+    assert client.get(f"/api/v1/meetings/{member_meeting_id}/extraction", headers=member_headers).status_code == 200
+    assert client.get(f"/api/v1/meetings/{member_meeting_id}/processing", headers=member_headers).status_code == 200
+    assert client.get(f"/api/v1/meetings/{member_meeting_id}/mentions", headers=member_headers).status_code == 200
+    # Refresh extraction is permitted for members; without a provider it may
+    # report unavailability, but it must never report forbidden.
+    assert client.post(f"/api/v1/meetings/{member_meeting_id}/extract", headers=member_headers).status_code in {200, 503}
     # Member: admin-only operations rejected (but own job counts are visible).
     assert client.post(f"/api/v1/orgs/{org_id}/members",
                        json={"email": f"{_tag('x')}@x.io", "role": "MEMBER", "password": "member-password-1"},
@@ -380,6 +395,60 @@ def test_s24_cross_tenant_meeting_idor_returns_not_found(client):
     assert client.post(f"/api/v1/meetings/{t['meeting_b']}/extract", headers=t["ha"]).status_code == 404
     # ...while the owning tenant reads fine.
     assert client.get(f"/api/v1/meetings/{t['meeting_a']}", headers=t["ha"]).status_code == 200
+
+
+def test_s24_meeting_workspace_reads_are_tenant_scoped(client):
+    t = _two_tenants(client)
+    for headers, own_meeting, foreign_meeting in (
+        (t["ha"], t["meeting_a"], t["meeting_b"]),
+        (t["hb"], t["meeting_b"], t["meeting_a"]),
+    ):
+        listed = client.get("/api/v1/meetings", headers=headers)
+        assert listed.status_code == 200, listed.text
+        listing = listed.json()
+        assert set(listing) == {"meetings", "limit", "returned_count", "has_more"}
+        listed_ids = [meeting["meeting_id"] for meeting in listing["meetings"]]
+        assert own_meeting in listed_ids
+        assert foreign_meeting not in listed_ids
+        summary = next(
+            meeting for meeting in listing["meetings"] if meeting["meeting_id"] == own_meeting
+        )
+        assert set(summary) == {
+            "meeting_id", "title", "meeting_date", "participants", "ingested_at",
+            "source_revision", "processing_status", "extraction_revision",
+            "extracted_at", "issue_count", "task_count", "decision_count",
+            "risk_count", "mention_count", "resolved_entity_count",
+        }
+
+        processing = client.get(f"/api/v1/meetings/{own_meeting}/processing", headers=headers)
+        assert processing.status_code == 200, processing.text
+        assert set(processing.json()) == {
+            "meeting_id", "source_revision", "status", "processing_complete",
+            "is_current", "extraction_revision", "derived_revision",
+            "semantic_revision", "stale_mentions", "worker_enabled",
+        }
+
+        extraction = client.get(f"/api/v1/meetings/{own_meeting}/extraction", headers=headers)
+        assert extraction.status_code == 200, extraction.text
+        assert set(extraction.json()) == {"meeting_id", "has_extraction", "extraction"}
+
+        mentions = client.get(f"/api/v1/meetings/{own_meeting}/mentions", headers=headers)
+        assert mentions.status_code == 200, mentions.text
+        mention_body = mentions.json()
+        assert set(mention_body) == {
+            "meeting_id", "mention_count", "resolved_mention_count", "mentions"
+        }
+        assert mention_body["mention_count"] >= 1
+        assert {mention["meeting_id"] for mention in mention_body["mentions"]} == {own_meeting}
+
+        # Foreign workspace reads look non-existent from either direction.
+        assert client.get(f"/api/v1/meetings/{foreign_meeting}/processing", headers=headers).status_code == 404
+        assert client.get(f"/api/v1/meetings/{foreign_meeting}/extraction", headers=headers).status_code == 404
+        assert client.get(f"/api/v1/meetings/{foreign_meeting}/mentions", headers=headers).status_code == 404
+
+    assert client.get("/api/v1/meetings").status_code == 401
+    assert client.get(f"/api/v1/meetings/{t['meeting_a']}").status_code == 401
+    assert client.get("/api/v1/meetings?limit=0", headers=t["ha"]).status_code == 422
 
 
 def test_s24_cross_tenant_entity_mention_idor(client):
