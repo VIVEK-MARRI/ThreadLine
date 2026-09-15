@@ -5,7 +5,9 @@ import {
   canManageMembers,
   canManageOrganisation,
   canManageRoles,
+  canReadEntity,
   canReadMeeting,
+  canRecordEntity,
   canRunMeetingProcessing,
   canUpdateMeeting,
   canViewDiagnostics,
@@ -48,5 +50,14 @@ describe("frontend role hints", () => {
     expect(canReadMeeting(null)).toBe(false);
     expect(canUpdateMeeting(null)).toBe(false);
     expect(canRunMeetingProcessing(null)).toBe(false);
+  });
+
+  it("matches backend entity permissions for every authenticated role", () => {
+    for (const role of ["MEMBER", "ADMIN", "OWNER"] as const) {
+      expect(canReadEntity(role)).toBe(true);
+      expect(canRecordEntity(role)).toBe(true);
+    }
+    expect(canReadEntity(null)).toBe(false);
+    expect(canRecordEntity(null)).toBe(false);
   });
 });

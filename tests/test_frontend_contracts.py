@@ -167,3 +167,106 @@ def test_dashboard_contract_shapes(client):
     assert isinstance(jobs_body["worker_enabled"], bool)
     assert isinstance(jobs_body["counts"], dict)
     assert isinstance(jobs_body["stale_running"], int)
+
+
+def test_entity_workspace_acceptance_contract(client):
+    """Exercise the complete entity workspace read path against real backend state."""
+    slug = _tag("entity-accept")
+    boot = client.post("/api/v1/auth/bootstrap", json={
+        "organisation_name": f"Entity {slug}",
+        "slug": slug,
+        "admin_email": f"{_tag('admin')}@x.io",
+        "password": "strong-password-1",
+    })
+    assert boot.status_code == 201, boot.text
+    data = boot.json()
+    NOW["users"].append(data["user"]["user_id"])
+    NOW["orgs"].append(data["organisation"]["organisation_id"])
+    org_id = data["organisation"]["organisation_id"]
+    headers = {
+        "Authorization": f"Bearer {data['token']['access_token']}",
+        "X-Organisation-ID": org_id,
+    }
+
+    canonical_name = f"Acceptance Gateway {slug}"
+    meeting_id = f"entity-accept-{slug}"
+    meeting = client.post("/api/v1/meetings", json={
+        "meeting_id": meeting_id,
+        "title": f"Acceptance Review {slug}",
+        "transcript": f"Sam mentioned {canonical_name.lower()} during acceptance.",
+        "meeting_date": "2026-09-10T10:00:00Z",
+        "participants": ["Sam"],
+    }, headers=headers)
+    assert meeting.status_code == 201, meeting.text
+
+    created = client.post("/api/v1/entities", json={
+        "entity_type": "ISSUE",
+        "canonical_name": canonical_name,
+    }, headers=headers)
+    assert created.status_code in {200, 201}, created.text
+    entity_id = created.json()["entity_id"]
+    assert created.json()["canonical_name"] == canonical_name.lower()
+
+    mention = client.post("/api/v1/entities/mentions", json={
+        "entity_type": "ISSUE",
+        "text": canonical_name.lower(),
+        "meeting_id": meeting_id,
+        "source_text": f"Sam mentioned {canonical_name.lower()} during acceptance.",
+    }, headers=headers)
+    assert mention.status_code == 201, mention.text
+    assert mention.json()["entity_id"] == entity_id
+    assert mention.json()["resolution_status"] == "RESOLVED"
+
+    workspace_paths = [
+        f"/api/v1/entities/{entity_id}",
+        f"/api/v1/entities/{entity_id}/temporal",
+        f"/api/v1/entities/{entity_id}/timeline",
+        f"/api/v1/entities/{entity_id}/memory",
+        f"/api/v1/entities/{entity_id}/insights",
+        f"/api/v1/entities/{entity_id}/attention",
+        f"/api/v1/entities/{entity_id}/actions",
+        f"/api/v1/entities/{entity_id}/relationships",
+        f"/api/v1/entities/{entity_id}/dependencies",
+        f"/api/v1/entities/{entity_id}/dependency-graph",
+        f"/api/v1/entities/{entity_id}/impacts",
+    ]
+    for path in workspace_paths:
+        response = client.get(path, headers=headers)
+        assert response.status_code == 200, (path, response.text)
+
+    temporal = client.get(f"/api/v1/entities/{entity_id}/temporal", headers=headers).json()
+    assert temporal["entity_id"] == entity_id
+    assert temporal["observation_count"] == 1
+    assert temporal["timeline"][0]["meeting_id"] == meeting_id
+
+    memory = client.get(f"/api/v1/entities/{entity_id}/memory", headers=headers).json()
+    assert memory["entity_id"] == entity_id
+    assert memory["observation_count"] == 1
+    assert memory["meeting_count"] == 1
+
+    timeline = client.get(f"/api/v1/entities/{entity_id}/timeline", headers=headers).json()
+    assert timeline["entity_id"] == entity_id
+    assert timeline["event_count"] >= 1
+
+    listed = client.get("/api/v1/entities", params={"entity_type": "ISSUE"}, headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert entity_id in {item["entity_id"] for item in listed.json()}
+    excluded = client.get("/api/v1/entities", params={"entity_type": "PERSON"}, headers=headers)
+    assert excluded.status_code == 200, excluded.text
+    assert entity_id not in {item["entity_id"] for item in excluded.json()}
+
+    scoped_changes = client.get("/api/v1/changes", params={"entity_id": entity_id}, headers=headers)
+    assert scoped_changes.status_code == 200, scoped_changes.text
+    assert set(scoped_changes.json()) == {
+        "total_changes", "critical_changes", "high_changes",
+        "medium_changes", "info_changes", "changes", "evaluated_at",
+    }
+
+    workspace_portfolio = client.get("/api/v1/portfolio", headers=headers)
+    assert workspace_portfolio.status_code == 200, workspace_portfolio.text
+    assert entity_id in {item["entity_id"] for item in workspace_portfolio.json()["entities"]}
+
+    assert client.get("/api/v1/entities/entity-does-not-exist", headers=headers).status_code == 404
+    unknown_org = dict(headers, **{"X-Organisation-ID": f"unknown-{slug}"})
+    assert client.get("/api/v1/entities", headers=unknown_org).status_code == 403
+    assert client.get(f"/api/v1/entities/{entity_id}", headers=unknown_org).status_code == 403

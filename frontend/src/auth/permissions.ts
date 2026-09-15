@@ -54,3 +54,16 @@ export function canUpdateMeeting(role: Role | null): boolean {
 export function canRunMeetingProcessing(role: Role | null): boolean {
   return role !== null;
 }
+
+/* Entity-workspace affordances mirror backend ROLE_PERMISSIONS today:
+ * MEMBER, ADMIN, and OWNER all hold ENTITY_READ and ENTITY_MANAGE. These
+ * helpers keep that assumption in one tested place; the backend remains
+ * authoritative if the policy ever changes.
+ */
+export function canReadEntity(role: Role | null): boolean {
+  return role !== null;
+}
+
+export function canRecordEntity(role: Role | null): boolean {
+  return role !== null;
+}

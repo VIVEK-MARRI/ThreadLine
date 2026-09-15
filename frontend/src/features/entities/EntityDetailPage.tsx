@@ -1,138 +1,123 @@
-import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { entitiesApi } from "../../api/entities";
-import { queryKeys } from "../../api/keys";
-import { useOrganisation } from "../../auth/OrganisationContext";
 import { useDocumentTitle } from "../../hooks/useDocumentTitle";
-import { Badge } from "../../components/ui/Badge";
-import { Card, Section } from "../../components/ui/Card";
+import { ApiError } from "../../types/api";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { EmptyState, ErrorState, LoadingState } from "../../components/feedback/States";
+import { EmptyState, ErrorState, Skeleton } from "../../components/feedback/States";
+import { formatEntityDay } from "./entitiesFormat";
+import { useEntityDetail } from "./useEntities";
+import {
+  EntityAttentionActionsSection,
+  EntityChangesSection,
+  EntityCurrentStateSection,
+  EntityDependencySection,
+  EntityImpactSection,
+  EntityMeetingsSection,
+  EntityMemorySection,
+  EntityMetadataRail,
+  EntityRiskSection,
+  EntityTimelineSection,
+} from "./EntityDetailSections";
+import "./entities.css";
 
-interface RelationshipEdge {
-  source_entity_id?: string;
-  target_entity_id?: string;
-  relationship_type?: string;
-  strength?: number;
+/* Entity Intelligence Workspace detail: the organisation’s living memory
+ * for one canonical entity. Detail, history, risks, dependencies, impact,
+ * meetings, changes, memory, and actions load in parallel and fail
+ * independently. Only backend-provided facts are shown.
+ */
+
+function DetailSkeleton(): React.JSX.Element {
+  return (
+    <div className="tl-page">
+      <PageHeader title="Entity" description="Loading organisational memory…" />
+      <div className="tl-entity-layout">
+        <div className="tl-entity-main">
+          <Skeleton lines={4} label="Loading current state" />
+          <Skeleton lines={6} label="Loading timeline" />
+          <Skeleton lines={4} label="Loading risk signals" />
+          <Skeleton lines={5} label="Loading dependencies" />
+          <Skeleton lines={4} label="Loading potential impact" />
+          <Skeleton lines={4} label="Loading related meetings" />
+          <Skeleton lines={4} label="Loading entity changes" />
+          <Skeleton lines={5} label="Loading memory and evidence" />
+          <Skeleton lines={4} label="Loading attention and actions" />
+        </div>
+        <div className="tl-entity-rail">
+          <Skeleton lines={5} label="Loading key context" />
+        </div>
+      </div>
+    </div>
+  );
 }
-
-interface RelationshipGraph {
-  entity_id: string;
-  relationship_count: number;
-  related_entity_ids: string[];
-  relationships: RelationshipEdge[];
-}
-
-/* Entity workspace (foundation): real facts + real relationships.
- * Timeline, impacts, and graphs arrive in the next stage. */
 
 export function EntityDetailPage(): React.JSX.Element {
   const { entityId = "" } = useParams();
-  useDocumentTitle("Entity");
-  const { organisationId } = useOrganisation();
+  const detail = useEntityDetail(entityId);
+  useDocumentTitle(detail.data?.canonical_name ?? "Entity");
 
-  const detail = useQuery({
-    queryKey: queryKeys.entity(organisationId ?? "", entityId),
-    queryFn: () => entitiesApi.get(entityId),
-    enabled: Boolean(organisationId && entityId),
-  });
-
-  const relationships = useQuery({
-    queryKey: queryKeys.entitySection(organisationId ?? "", entityId, "relationships"),
-    queryFn: () => entitiesApi.section<RelationshipGraph>(entityId, "relationships"),
-    enabled: Boolean(organisationId && entityId && detail.isSuccess),
-  });
-
-  if (detail.isPending) return <LoadingState title="Loading entity" />;
+  if (detail.isLoading) return <DetailSkeleton />;
   if (detail.isError) {
+    const unavailable =
+      detail.error instanceof ApiError &&
+      (detail.error.kind === "not-found" || detail.error.kind === "forbidden");
     return (
       <div className="tl-page">
-        <PageHeader title="Entity" crumbs={[{ label: "Entities", to: "/app/entities" }]} />
-        <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />
+        <PageHeader title="Entity unavailable" crumbs={[{ label: "Entities", to: "/app/entities" }]} />
+        {unavailable ? (
+          <EmptyState
+            title="This entity isn't available"
+            body="It may not exist, or it may belong to another organisation."
+            action={
+              <Link className="tl-btn tl-btn-secondary" to="/app/entities">
+                Back to entities
+              </Link>
+            }
+          />
+        ) : (
+          <ErrorState
+            title="Couldn't load this entity"
+            error={detail.error}
+            onRetry={() => void detail.refetch()}
+          />
+        )}
       </div>
     );
   }
 
   const entity = detail.data;
+  if (!entity) {
+    return (
+      <div className="tl-page">
+        <PageHeader title="Entity unavailable" crumbs={[{ label: "Entities", to: "/app/entities" }]} />
+        <ErrorState
+          title="Couldn't load this entity"
+          error={new Error("The entity response was empty.")}
+          onRetry={() => void detail.refetch()}
+        />
+      </div>
+    );
+  }
+  const trackedSince = formatEntityDay(entity.created_at) ?? "Date not provided";
 
   return (
     <div className="tl-page">
       <PageHeader
         title={entity.canonical_name}
-        description={`${entity.entity_type} · tracked since ${new Date(entity.created_at).toLocaleDateString()}`}
+        description={`${entity.entity_type} · tracked since ${trackedSince}`}
         crumbs={[{ label: "Entities", to: "/app/entities" }, { label: entity.canonical_name }]}
       />
-      <div className="tl-split">
-        <Section title="Facts">
-          <Card>
-            <dl className="tl-facts">
-              <div>
-                <dt>Type</dt>
-                <dd>
-                  <Badge tone={entity.entity_type === "PERSON" ? "teal" : "info"}>
-                    {entity.entity_type}
-                  </Badge>
-                </dd>
-              </div>
-              <div>
-                <dt>Also known as</dt>
-                <dd>
-                  {entity.aliases && entity.aliases.length > 0 ? (
-                    <span className="tl-badge-row">
-                      {entity.aliases.map((alias) => (
-                        <Badge key={alias}>{alias}</Badge>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="tl-muted">No aliases recorded.</span>
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt>Entity ID</dt>
-                <dd className="tl-mono">{entity.entity_id}</dd>
-              </div>
-            </dl>
-          </Card>
-        </Section>
-        <Section
-          title="Relationships"
-          description="Deterministic links observed in your meetings — co-occurrence and explicit statements."
-        >
-          <Card>
-            {relationships.isPending ? (
-              <LoadingState title="Loading relationships" />
-            ) : relationships.isError ? (
-              <ErrorState error={relationships.error} onRetry={() => void relationships.refetch()} />
-            ) : relationships.data.relationships.length === 0 ? (
-              <EmptyState
-                title="No relationships yet"
-                body="Links appear once this entity is mentioned alongside others in processed meetings."
-              />
-            ) : (
-              <ul className="tl-rel-list">
-                {relationships.data.relationships.slice(0, 12).map((edge, index) => {
-                  const other =
-                    edge.source_entity_id === entity.entity_id
-                      ? edge.target_entity_id
-                      : edge.source_entity_id;
-                  return (
-                    <li key={`${edge.relationship_type}-${other}-${index}`}>
-                      <Badge tone="neutral">{edge.relationship_type ?? "RELATED"}</Badge>
-                      {other ? (
-                        <Link className="tl-link-strong" to={`/app/entities/${encodeURIComponent(other)}`}>
-                          {other}
-                        </Link>
-                      ) : (
-                        <span className="tl-muted">Unknown entity</span>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </Card>
-        </Section>
+      <div className="tl-entity-layout">
+        <div className="tl-entity-main">
+          <EntityCurrentStateSection entityId={entity.entity_id} />
+          <EntityTimelineSection entityId={entity.entity_id} />
+          <EntityRiskSection entityId={entity.entity_id} />
+          <EntityDependencySection entityId={entity.entity_id} />
+          <EntityImpactSection entityId={entity.entity_id} />
+          <EntityMeetingsSection entityId={entity.entity_id} />
+          <EntityChangesSection entityId={entity.entity_id} />
+          <EntityMemorySection entityId={entity.entity_id} />
+          <EntityAttentionActionsSection entityId={entity.entity_id} />
+        </div>
+        <EntityMetadataRail entity={entity} entityId={entity.entity_id} />
       </div>
     </div>
   );
