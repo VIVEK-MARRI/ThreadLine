@@ -86,6 +86,10 @@ export function OrganisationProvider({ children }: { children: ReactNode }): Rea
         (m) => m.status === "ACTIVE" && m.organisation.organisation_id === organisationId,
       );
       if (!known) return false;
+      // Re-selecting the active organisation must be a no-op: clearing the
+      // cache and then setting identical state bails out of re-rendering,
+      // which would strand every query observer with no data and no fetch.
+      if (organisationId === selectedIdRef.current) return true;
       // Scope the API client to the new organisation synchronously: clearing
       // the query cache retriggers refetches before React commits this state
       // change, and those requests must already carry the new tenant header.

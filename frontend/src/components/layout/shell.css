@@ -312,6 +312,13 @@
     display: none;
   }
 
+  /* The full wordmark does not fit next to the menu, organisation, and
+   * account controls at phone widths; the logo mark carries the brand here
+   * while the drawer and sidebar keep the full wordmark. */
+  .tl-header-brand .tl-logo-word {
+    display: none;
+  }
+
   .tl-org-name {
     max-width: 7rem;
   }

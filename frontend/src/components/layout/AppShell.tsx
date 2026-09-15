@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   BarChart3,
@@ -38,8 +38,26 @@ export function AppShell(): React.JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Keyboard users must be able to dismiss the mobile drawer without
+  // reaching for the pointer; return focus to the control that opened it.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === "Escape") {
+        setDrawerOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [drawerOpen]);
 
   function handleSelectOrganisation(organisationId: string): void {
+    if (organisationId === current?.organisation.organisation_id) return;
     if (!select(organisationId)) return;
     // Query filters are tenant-scoped UI state. Keep the destination route,
     // but do not carry one organisation’s filters into another organisation.
@@ -82,6 +100,7 @@ export function AppShell(): React.JSX.Element {
       <header className="tl-header">
         <button
           type="button"
+          ref={menuButtonRef}
           className="tl-icon-btn tl-header-menu"
           aria-label={drawerOpen ? "Close navigation" : "Open navigation"}
           aria-expanded={drawerOpen}

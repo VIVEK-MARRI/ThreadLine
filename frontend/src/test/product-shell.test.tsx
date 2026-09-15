@@ -250,6 +250,34 @@ describe("product shell", () => {
     expect(screen.getByLabelText(/processing/i)).toHaveValue("ALL");
   });
 
+  it("re-selecting the active organisation mid-flight keeps the pending query alive", async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem("tl.session.token", "good-token");
+    let resolveMeetings!: (value: Response) => void;
+    const pendingMeetings = new Promise<Response>((resolve) => {
+      resolveMeetings = resolve;
+    });
+    renderAtRoute("/app/meetings", (_method, pathname) => {
+      const auth = authStub()(_method, pathname);
+      if (auth) return auth;
+      if (pathname === "/api/v1/meetings") return pendingMeetings as unknown as Response;
+      return null;
+    });
+
+    // The header is interactive while the list is still loading: re-selecting
+    // the active organisation must be a no-op so the in-flight query keeps
+    // its observer. A rejection afterwards must reach the normal error UI
+    // instead of stranding the page on skeletons.
+    await screen.findByRole("button", { name: /switch organisation/i }, WAIT);
+    await user.click(screen.getByRole("button", { name: /switch organisation/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /alpha/i }));
+    resolveMeetings(jsonResponse(500, { detail: "boom" }));
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load meetings")).toBeInTheDocument();
+    }, WAIT);
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+  });
+
   it("keeps guard recovery inside client-side routing", async () => {
     const user = userEvent.setup();
     sessionStorage.setItem("tl.session.token", "good-token");

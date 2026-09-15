@@ -248,15 +248,30 @@ def require_permission(permission: Permission):
 
 
 def require_user() -> object:
-    """Dependency returning the authenticated user (401 for anonymous)."""
+    """Dependency returning the authenticated user (401 for anonymous).
 
-    def _dependency(ctx: Authorisation = Depends(get_request_context)) -> User:
-        if ctx.anonymous or ctx.user is None:
+    Identity-only: validates the bearer token WITHOUT resolving an
+    organisation scope, so callers with zero or several memberships can
+    still authenticate (login, session restore, org listing/creation all
+    depend on this). Tenant-scoped endpoints must keep using
+    get_request_context/require_permission/require_org_permission.
+    """
+
+    def _dependency(request: Request) -> User:
+        token = _bearer_token(request)
+        if token is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="authentication required",
             )
-        return ctx.user
+        try:
+            user, _session = get_auth_service().validate_token(token)
+        except InvalidCredentialsError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or expired session",
+            )
+        return user
 
     return _dependency
 

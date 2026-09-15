@@ -14,7 +14,9 @@
   --tl-surface-sunken: #f1ede3;
   --tl-ink: #211d16;
   --tl-ink-secondary: #5c564a;
-  --tl-ink-muted: #8a8175;
+  /* Muted body text must stay readable: this value holds ≥ 4.5:1 contrast on
+   * paper, surface, and sunken backgrounds (verified by axe in e2e). */
+  --tl-ink-muted: #6b6357;
   --tl-ink-faint: #b3aa99;
   --tl-line: #e4ddcd;
   --tl-line-strong: #d3c9b2;

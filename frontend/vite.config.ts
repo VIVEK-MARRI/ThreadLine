@@ -20,6 +20,22 @@ export default defineConfig({
       },
     },
   },
+  // `vite preview` serves the production build for release validation. It
+  // needs the same backend proxy as the dev server; nothing here affects
+  // the production bundle itself.
+  preview: {
+    port: 4173,
+    proxy: {
+      "/api": {
+        target: process.env.THREADLINE_API_PROXY ?? "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: process.env.THREADLINE_API_PROXY ?? "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+    },
+  },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],

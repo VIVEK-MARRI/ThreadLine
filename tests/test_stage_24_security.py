@@ -500,6 +500,28 @@ def test_s24_multi_membership_header_selection(client):
     assert client.get("/api/v1/entities", headers=_org_headers(token, org_b)).status_code == 200
 
 
+def test_s24_multi_membership_identity_needs_no_org_scope(client):
+    # Regression: require_user() previously funneled through
+    # get_request_context, so any user with several memberships received 403
+    # on /auth/me and could never log in or restore a session. Identity
+    # endpoints authenticate the token only; tenant endpoints still demand
+    # an explicit, valid scope.
+    data = _bootstrap(client)
+    token = data["token"]["access_token"]
+    org_a = data["organisation"]["organisation_id"]
+    org_b = _create_org(client, token)["organisation_id"]
+    headers = _auth(token)
+    me = client.get("/api/v1/auth/me", headers=headers)
+    assert me.status_code == 200, me.text
+    assert {m["organisation"]["organisation_id"] for m in me.json()["memberships"]} == {
+        org_a, org_b}
+    mine = client.get("/api/v1/orgs", headers=headers)
+    assert mine.status_code == 200, mine.text
+    assert {o["organisation"]["organisation_id"] for o in mine.json()} == {org_a, org_b}
+    assert client.get("/api/v1/entities", headers=headers).status_code == 403
+    assert client.get("/api/v1/entities", headers=_org_headers(token, org_b)).status_code == 200
+
+
 # ===========================================================================
 # §33.10–11, 16–18 — semantic / query / resolution / intelligence isolation
 # ===========================================================================
