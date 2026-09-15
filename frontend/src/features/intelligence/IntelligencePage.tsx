@@ -1,131 +1,157 @@
-import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { intelligenceApi } from "../../api/intelligence";
-import { queryKeys } from "../../api/keys";
+import { useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useOrganisation } from "../../auth/OrganisationContext";
 import { useDocumentTitle } from "../../hooks/useDocumentTitle";
-import { Badge } from "../../components/ui/Badge";
-import { Card, Section } from "../../components/ui/Card";
 import { PageHeader } from "../../components/layout/PageHeader";
-import { EmptyState, ErrorState, LoadingState } from "../../components/feedback/States";
-import { StatusBadge } from "../../components/ui/Badge";
-import { attentionLevelTone } from "../../components/ui/status";
+import { Alert } from "../../components/ui/Alert";
+import { relativeTime } from "../dashboard/dashboardFormat";
+import type {
+  AttentionResponse,
+  ChangesResponse,
+  PortfolioEntitySummary,
+  PortfolioResponse,
+} from "../../types/intelligence";
+import type { MeetingSummary } from "../../types/meetings";
+import {
+  AttentionSignalsSection,
+  ChangeStreamFilters,
+  ChangeStreamSection,
+  FollowUpPathsSection,
+  ImpactMovementSection,
+  RecentMovementSection,
+  RepeatedSignalsSection,
+  type SectionQuery,
+} from "./IntelligenceSections";
+import {
+  hasActiveStreamFilters,
+  parseChangeSeverity,
+  parseChangeType,
+  parseIntelligenceEntityType,
+  selectFreshnessTimestamp,
+  type IntelligenceChangeFilters,
+} from "./intelligenceFormat";
+import {
+  useIntelligenceAttention,
+  useIntelligenceChangeStream,
+  useIntelligenceMeetingDirectory,
+  useIntelligenceMovement,
+  useIntelligencePortfolio,
+  useIntelligenceRepeatedSignals,
+} from "./useIntelligence";
+import "./intelligence.css";
 
-/* Intelligence (foundation): real counts + real top items from the three
- * organisation signals. Deep dives arrive in the next stage. */
+/* Intelligence workspace: organisation-level attention, changes, repeated
+ * signals, dependency/impact movement, recent movement, and follow-up paths.
+ * Sections load from real backend intelligence in parallel and fail
+ * independently. Nothing is scored, trended, or predicted in React.
+ */
 
 export function IntelligencePage(): React.JSX.Element {
   useDocumentTitle("Intelligence");
-  const { organisationId } = useOrganisation();
+  const { current } = useOrganisation();
+  const [params, setParams] = useSearchParams();
+  const organisationName = current?.organisation.name ?? "your organisation";
 
-  const attention = useQuery({
-    queryKey: queryKeys.attention(organisationId ?? ""),
-    queryFn: () => intelligenceApi.attention(),
-    enabled: Boolean(organisationId),
-  });
-  const portfolio = useQuery({
-    queryKey: queryKeys.portfolio(organisationId ?? ""),
-    queryFn: () => intelligenceApi.portfolio(),
-    enabled: Boolean(organisationId),
-  });
-  const changes = useQuery({
-    queryKey: queryKeys.changes(organisationId ?? "", { limit: 8 }),
-    queryFn: () => intelligenceApi.changes({ limit: 8 }),
-    enabled: Boolean(organisationId),
-  });
+  const filters: IntelligenceChangeFilters = useMemo(
+    () => ({
+      severity: parseChangeSeverity(params.get("severity")),
+      changeType: parseChangeType(params.get("change_type")),
+      entityType: parseIntelligenceEntityType(params.get("entity_type")),
+    }),
+    [params],
+  );
+
+  const attention: SectionQuery<AttentionResponse> = useIntelligenceAttention();
+  const portfolio: SectionQuery<PortfolioResponse> = useIntelligencePortfolio();
+  const stream: SectionQuery<ChangesResponse> = useIntelligenceChangeStream(filters);
+  const repeated: SectionQuery<ChangesResponse> = useIntelligenceRepeatedSignals();
+  const movement: SectionQuery<ChangesResponse> = useIntelligenceMovement();
+  const meetingsQuery = useIntelligenceMeetingDirectory();
+  const meetingDirectory: Map<string, MeetingSummary> = meetingsQuery.directory;
+
+  const entities = useMemo(() => {    const directory = new Map<string, PortfolioEntitySummary>();
+    for (const entity of portfolio.data?.entities ?? []) {
+      directory.set(entity.entity_id, entity);
+    }
+    return directory;
+  }, [portfolio.data]);
+
+  const freshness = selectFreshnessTimestamp([
+    ...(attention.data?.items.map((item) => item.evaluated_at) ?? []),
+    portfolio.data?.evaluated_at,
+    stream.data?.evaluated_at,
+    repeated.data?.evaluated_at,
+    movement.data?.evaluated_at,
+  ]);
+  const freshnessText = freshness
+    ? `Intelligence evaluated ${relativeTime(freshness) ?? freshness}.`
+    : null;
+
+  function updateFilters(next: IntelligenceChangeFilters): void {
+    const updated = new URLSearchParams(params);
+    if (next.severity === "ALL") updated.delete("severity");
+    else updated.set("severity", next.severity);
+    if (next.changeType === "ALL") updated.delete("change_type");
+    else updated.set("change_type", next.changeType);
+    if (next.entityType === "ALL") updated.delete("entity_type");
+    else updated.set("entity_type", next.entityType);
+    setParams(updated, { replace: true });
+  }
 
   return (
     <div className="tl-page">
       <PageHeader
         title="Intelligence"
-        description="What needs your attention across the organisation — computed deterministically from your meetings, never guessed."
+        description={`What is changing across ${organisationName}, why it matters, and where to investigate next. Every signal below comes from deterministic backend intelligence — never generated prose.`}
       />
-      <div className="tl-grid-3">
-        <Card>
-          <h2 className="tl-section-title">Attention</h2>
-          {attention.isPending ? (
-            <LoadingState title="Loading attention" />
-          ) : attention.isError ? (
-            <ErrorState error={attention.error} onRetry={() => void attention.refetch()} />
-          ) : attention.data.items.length === 0 ? (
-            <EmptyState title="All quiet" body="No entity currently needs attention." />
-          ) : (
-            <ul className="tl-top-list">
-              {attention.data.items.slice(0, 5).map((item) => (
-                <li key={item.attention_id}>
-                  <StatusBadge tone={attentionLevelTone(item.attention_level)} label={item.attention_level} />
-                  <Link
-                    className="tl-link-strong"
-                    to={`/app/entities/${encodeURIComponent(item.entity_id)}`}
-                  >
-                    {item.entity_id}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-        <Card>
-          <h2 className="tl-section-title">Risk posture</h2>
-          {portfolio.isPending ? (
-            <LoadingState title="Loading portfolio" />
-          ) : portfolio.isError ? (
-            <ErrorState error={portfolio.error} onRetry={() => void portfolio.refetch()} />
-          ) : (
-            <dl className="tl-facts">
-              <div>
-                <dt>Tracked entities</dt>
-                <dd className="tl-numeric">{portfolio.data.total_entities}</dd>
-              </div>
-              <div>
-                <dt>Critical</dt>
-                <dd className="tl-numeric">{portfolio.data.critical_entities}</dd>
-              </div>
-              <div>
-                <dt>High risk</dt>
-                <dd className="tl-numeric">{portfolio.data.high_risk_entities}</dd>
-              </div>
-              <div>
-                <dt>Blocked</dt>
-                <dd className="tl-numeric">{portfolio.data.blocked_entities}</dd>
-              </div>
-            </dl>
-          )}
-        </Card>
-        <Card>
-          <h2 className="tl-section-title">Recent changes</h2>
-          {changes.isPending ? (
-            <LoadingState title="Loading changes" />
-          ) : changes.isError ? (
-            <ErrorState error={changes.error} onRetry={() => void changes.refetch()} />
-          ) : changes.data.changes.length === 0 ? (
-            <EmptyState title="No changes detected" body="State transitions and new signals will appear here." />
-          ) : (
-            <ul className="tl-top-list">
-              {changes.data.changes.slice(0, 5).map((change) => (
-                <li key={change.change_id}>
-                  <Badge tone="neutral">{change.change_type}</Badge>
-                  <Link
-                    className="tl-link-strong"
-                    to={`/app/entities/${encodeURIComponent(change.entity_id)}`}
-                  >
-                    {change.entity_id}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+      {freshnessText ? (
+        <p className="tl-intel-freshness" role="status">
+          {freshnessText}
+        </p>
+      ) : null}
+      {portfolio.isError && !portfolio.isLoading ? (
+        <Alert tone="warning" title="Organisation directory is temporarily unavailable">
+          Attention and change records still link by entity ID. Names return when the portfolio
+          snapshot loads again.
+        </Alert>
+      ) : null}
+      {meetingsQuery.query.isError && !meetingsQuery.query.isLoading ? (
+        <Alert tone="warning" title="Meeting titles are temporarily unavailable">
+          Change and attention records still link to the correct meetings by ID.
+        </Alert>
+      ) : null}
+
+      <div className="tl-intel-layout">
+        <div className="tl-intel-main">
+          <AttentionSignalsSection query={attention} entities={entities} />
+          <ChangeStreamSection
+            query={stream}
+            entities={entities}
+            meetings={meetingDirectory}
+            filters={filters}
+            controls={
+              <ChangeStreamFilters
+                filters={filters}
+                onChange={updateFilters}
+                onClear={() => setParams({}, { replace: true })}
+                disabledEntityType={portfolio.isLoading || portfolio.isError}
+              />
+            }
+          />
+          <RepeatedSignalsSection query={repeated} entities={entities} meetings={meetingDirectory} />
+          <ImpactMovementSection query={movement} entities={entities} meetings={meetingDirectory} />
+          <RecentMovementSection query={movement} entities={entities} meetings={meetingDirectory} />
+        </div>
+        <div className="tl-intel-side">
+          <FollowUpPathsSection query={portfolio} />
+          {hasActiveStreamFilters(filters) ? (
+            <p className="tl-intel-section-note" role="status">
+              Stream filters apply only to the change stream above. Attention, repeated signals,
+              movement, and follow-up paths remain complete.
+            </p>
+          ) : null}
+        </div>
       </div>
-      <Section title="How to read this" description="Every item links to the entity it came from. Severity is rule-based and deterministic.">
-        <Card>
-          <p className="tl-body-secondary">
-            Attention levels run CRITICAL → HIGH → MEDIUM → LOW. Changes carry the
-            verbatim evidence that triggered them. Nothing here is generated prose —
-            open an entity to inspect the underlying meetings.
-          </p>
-        </Card>
-      </Section>
     </div>
   );
 }

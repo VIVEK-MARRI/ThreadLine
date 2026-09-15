@@ -12,7 +12,12 @@ import { AppProviders } from "../app/providers";
 import { createTestRouter } from "../app/router";
 import { configureApiClient } from "../api/client";
 
-export type FetchStub = (method: string, pathname: string, init: RequestInit) => Response | null;
+export type FetchStub = (
+  method: string,
+  pathname: string,
+  init: RequestInit,
+  query?: string,
+) => Response | null;
 
 export function jsonResponse(status: number, payload: unknown): Response {
   return new Response(payload === null ? "" : JSON.stringify(payload), {
@@ -30,7 +35,7 @@ export function installFetchStub(stub: FetchStub): void {
           ? input.href
           : input.url;
     const url = new URL(raw);
-    const matched = stub(init.method ?? "GET", url.pathname, init);
+    const matched = stub(init.method ?? "GET", url.pathname, init, url.search);
     if (matched) return matched;
     return jsonResponse(404, { detail: "not found in test stub" });
   });

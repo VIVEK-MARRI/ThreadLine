@@ -35,6 +35,25 @@ describe("tenant-aware query keys", () => {
       "changes",
       { limit: 8 },
     ]);
+    expect(
+      queryKeys.changes("org-a", {
+        limit: 50,
+        severity: "HIGH",
+        change_type: "STATE_BLOCKED",
+        entity_type: "ISSUE",
+      }),
+    ).toEqual([
+      "tl",
+      "org-a",
+      "changes",
+      { limit: 50, severity: "HIGH", change_type: "STATE_BLOCKED", entity_type: "ISSUE" },
+    ]);
+    expect(queryKeys.meetings("org-a", { limit: 100 })).toEqual([
+      "tl",
+      "org-a",
+      "meetings",
+      { limit: 100 },
+    ]);
     expect(queryKeys.jobs("org-a")).toEqual(["tl", "org-a", "jobs"]);
     expect(queryKeys.queryEvidence("org-a", "status?")).toEqual([
       "tl",
@@ -85,6 +104,28 @@ describe("tenant-aware query keys", () => {
     );
     expect(JSON.stringify(queryKeys.changes("org-a", { limit: 8 }))).not.toBe(
       JSON.stringify(queryKeys.changes("org-b", { limit: 8 })),
+    );
+    expect(
+      JSON.stringify(
+        queryKeys.changes("org-a", {
+          limit: 50,
+          severity: "HIGH",
+          change_type: "STATE_BLOCKED",
+          entity_type: "ISSUE",
+        }),
+      ),
+    ).not.toBe(
+      JSON.stringify(
+        queryKeys.changes("org-b", {
+          limit: 50,
+          severity: "HIGH",
+          change_type: "STATE_BLOCKED",
+          entity_type: "ISSUE",
+        }),
+      ),
+    );
+    expect(JSON.stringify(queryKeys.meetings("org-a", { limit: 100 }))).not.toBe(
+      JSON.stringify(queryKeys.meetings("org-b", { limit: 100 })),
     );
     expect(JSON.stringify(queryKeys.jobs("org-a"))).not.toBe(
       JSON.stringify(queryKeys.jobs("org-b")),

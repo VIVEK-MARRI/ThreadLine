@@ -270,3 +270,141 @@ def test_entity_workspace_acceptance_contract(client):
     unknown_org = dict(headers, **{"X-Organisation-ID": f"unknown-{slug}"})
     assert client.get("/api/v1/entities", headers=unknown_org).status_code == 403
     assert client.get(f"/api/v1/entities/{entity_id}", headers=unknown_org).status_code == 403
+
+
+def test_intelligence_workspace_acceptance_contract(client):
+    """Seed real blocked/dependency/repeated intelligence and prove the exact shapes Intelligence uses."""
+    slug = _tag("intelligence")
+    boot = client.post("/api/v1/auth/bootstrap", json={
+        "organisation_name": f"Intelligence {slug}",
+        "slug": slug,
+        "admin_email": f"{_tag('admin')}@x.io",
+        "password": "strong-password-1",
+    })
+    assert boot.status_code == 201, boot.text
+    data = boot.json()
+    NOW["users"].append(data["user"]["user_id"])
+    NOW["orgs"].append(data["organisation"]["organisation_id"])
+    org_id = data["organisation"]["organisation_id"]
+    headers = {
+        "Authorization": f"Bearer {data['token']['access_token']}",
+        "X-Organisation-ID": org_id,
+    }
+
+    gateway = f"acceptance gateway {slug}"
+    helper = f"acceptance helper {slug}"
+    opened_meeting = f"intelligence-opened-{slug}"
+    blocked_meeting = f"intelligence-blocked-{slug}"
+    for meeting_id, title, meeting_date, transcript in (
+        (opened_meeting, f"Opened Review {slug}", "2026-09-10T10:00:00Z", f"Sam opened {gateway}."),
+        (blocked_meeting, f"Blocked Review {slug}", "2026-09-12T10:00:00Z", f"Sam discussed {gateway}."),
+    ):
+        meeting = client.post("/api/v1/meetings", json={
+            "meeting_id": meeting_id,
+            "title": title,
+            "transcript": transcript,
+            "meeting_date": meeting_date,
+            "participants": ["Sam"],
+        }, headers=headers)
+        assert meeting.status_code == 201, meeting.text
+
+    created_helper = client.post("/api/v1/entities", json={
+        "entity_type": "ISSUE",
+        "canonical_name": helper,
+    }, headers=headers)
+    assert created_helper.status_code in {200, 201}, created_helper.text
+    helper_id = created_helper.json()["entity_id"]
+    created_gateway = client.post("/api/v1/entities", json={
+        "entity_type": "ISSUE",
+        "canonical_name": gateway,
+    }, headers=headers)
+    assert created_gateway.status_code in {200, 201}, created_gateway.text
+    gateway_id = created_gateway.json()["entity_id"]
+
+    opened_mention = client.post("/api/v1/entities/mentions", json={
+        "entity_type": "ISSUE",
+        "text": gateway,
+        "meeting_id": opened_meeting,
+        "source_text": f"Sam opened {gateway}.",
+    }, headers=headers)
+    assert opened_mention.status_code == 201, opened_mention.text
+    blocked_mention = client.post("/api/v1/entities/mentions", json={
+        "entity_type": "ISSUE",
+        "text": gateway,
+        "meeting_id": blocked_meeting,
+        "source_text": f"{gateway} depends on {helper}. The {gateway} is blocked.",
+    }, headers=headers)
+    assert blocked_mention.status_code == 201, blocked_mention.text
+    repeated_mention = client.post("/api/v1/entities/mentions", json={
+        "entity_type": "ISSUE",
+        "text": gateway,
+        "meeting_id": blocked_meeting,
+        "source_text": f"Sam repeated {gateway} during acceptance.",
+    }, headers=headers)
+    assert repeated_mention.status_code == 201, repeated_mention.text
+
+    attention = client.get("/api/v1/attention", headers=headers)
+    assert attention.status_code == 200, attention.text
+    attention_items = {
+        item["entity_id"]: item for item in attention.json()["items"]
+    }
+    assert attention_items[gateway_id]["attention_level"] == "CRITICAL"
+    assert "ENTITY_BLOCKED" in attention_items[gateway_id]["reasons"]
+
+    portfolio = client.get("/api/v1/portfolio", headers=headers)
+    assert portfolio.status_code == 200, portfolio.text
+    portfolio_entities = {
+        item["entity_id"]: item for item in portfolio.json()["entities"]
+    }
+    assert portfolio_entities[gateway_id]["current_state"] == "BLOCKED"
+    assert portfolio_entities[gateway_id]["risk_level"] == "CRITICAL"
+    assert portfolio_entities[gateway_id]["action_count"] >= 1
+    assert portfolio_entities[helper_id]["canonical_name"] == helper
+
+    blocked_changes = client.get(
+        "/api/v1/changes",
+        params={"change_type": "STATE_BLOCKED", "limit": 50},
+        headers=headers,
+    )
+    assert blocked_changes.status_code == 200, blocked_changes.text
+    assert gateway_id in {change["entity_id"] for change in blocked_changes.json()["changes"]}
+
+    repeated_changes = client.get(
+        "/api/v1/changes",
+        params={"change_type": "REPEATED_UNRESOLVED", "limit": 25},
+        headers=headers,
+    )
+    assert repeated_changes.status_code == 200, repeated_changes.text
+    assert gateway_id in {change["entity_id"] for change in repeated_changes.json()["changes"]}
+
+    dependency_changes = client.get(
+        "/api/v1/changes",
+        params={"change_type": "NEW_DEPENDENCY", "limit": 50},
+        headers=headers,
+    )
+    assert dependency_changes.status_code == 200, dependency_changes.text
+    dependency_rows = dependency_changes.json()["changes"]
+    assert gateway_id in {change["entity_id"] for change in dependency_rows}
+    assert any(
+        gateway_id in change["dependency_path"] and helper_id in change["dependency_path"]
+        for change in dependency_rows
+        if change["dependency_path"]
+    )
+
+    critical_changes = client.get(
+        "/api/v1/changes",
+        params={"severity": "CRITICAL", "limit": 50},
+        headers=headers,
+    )
+    assert critical_changes.status_code == 200, critical_changes.text
+    assert all(
+        change["severity"] == "CRITICAL" for change in critical_changes.json()["changes"]
+    )
+    assert gateway_id in {change["entity_id"] for change in critical_changes.json()["changes"]}
+
+    meetings = client.get("/api/v1/meetings", params={"limit": 100}, headers=headers)
+    assert meetings.status_code == 200, meetings.text
+    meeting_titles = {
+        meeting["meeting_id"]: meeting["title"] for meeting in meetings.json()["meetings"]
+    }
+    assert meeting_titles[blocked_meeting] == f"Blocked Review {slug}"

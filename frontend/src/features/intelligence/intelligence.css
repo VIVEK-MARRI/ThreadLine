@@ -1,0 +1,197 @@
+/* Intelligence workspace: calm, editorial organisation intelligence.
+ * Rows and history use borders, not dashboard-style cards. The page reads in
+ * source order: attention, change stream, repeated signals, dependency and
+ * impact movement, recent movement, and follow-up paths. One column below
+ * 1024px.
+ */
+
+.tl-intel-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--tl-section-gap);
+  align-items: start;
+}
+
+@media (min-width: 1024px) {
+  .tl-intel-layout {
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  }
+}
+
+.tl-intel-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-section-gap);
+}
+
+.tl-intel-side {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--tl-section-gap);
+}
+
+.tl-intel-freshness {
+  margin: var(--tl-space-sm) 0 0;
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+}
+
+.tl-intel-toolbar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--tl-space-md);
+  margin-bottom: var(--tl-space-md);
+}
+
+@media (min-width: 760px) {
+  .tl-intel-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+    align-items: end;
+  }
+}
+
+.tl-intel-toolbar-actions {
+  display: flex;
+  align-items: end;
+}
+
+.tl-intel-result-count {
+  margin: 0 0 var(--tl-space-md);
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+}
+
+.tl-intel-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tl-intel-rows > li {
+  padding: var(--tl-space-md) 0;
+  border-bottom: 1px solid var(--tl-line);
+}
+
+.tl-intel-rows > li:first-child {
+  padding-top: 0;
+}
+
+.tl-intel-rows > li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.tl-intel-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--tl-space-xs) var(--tl-space-md);
+}
+
+.tl-intel-row-title {
+  margin: 0;
+  color: var(--tl-ink);
+  font-size: var(--tl-text-body-size);
+  line-height: var(--tl-text-body-leading);
+  overflow-wrap: anywhere;
+}
+
+.tl-intel-row-title-link {
+  color: var(--tl-ink);
+  font-weight: 650;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+a.tl-intel-row-title-link:hover {
+  color: var(--tl-primary-700);
+  text-decoration: underline;
+}
+
+.tl-intel-row-detail {
+  margin: var(--tl-space-xs) 0 0;
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+  line-height: var(--tl-text-secondary-leading);
+  overflow-wrap: anywhere;
+}
+
+.tl-intel-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--tl-space-xs) var(--tl-space-md);
+  margin-top: var(--tl-space-xs);
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+}
+
+.tl-intel-link {
+  color: var(--tl-primary-700);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.tl-intel-link:hover {
+  text-decoration: underline;
+}
+
+.tl-intel-evidence {
+  border: var(--tl-border);
+  border-radius: var(--tl-radius-md);
+  background: var(--tl-surface);
+  margin-top: var(--tl-space-sm);
+  padding: 0 var(--tl-space-lg);
+}
+
+.tl-intel-evidence > summary {
+  cursor: pointer;
+  padding: var(--tl-space-md) 0;
+  color: var(--tl-primary-700);
+  font-weight: 650;
+  font-size: var(--tl-text-body-size);
+}
+
+.tl-intel-evidence-body {
+  max-width: 68ch;
+  margin: 0;
+  padding: 0 0 var(--tl-space-lg);
+}
+
+.tl-intel-quote {
+  margin: var(--tl-space-sm) 0 0;
+  padding-left: var(--tl-space-sm);
+  border-left: 2px solid var(--tl-line);
+  color: var(--tl-ink-muted);
+  font-size: var(--tl-text-secondary-size);
+  line-height: var(--tl-text-secondary-leading);
+  overflow-wrap: anywhere;
+}
+
+.tl-intel-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--tl-space-xs);
+  margin: var(--tl-space-xs) 0 0;
+  overflow-wrap: anywhere;
+}
+
+.tl-intel-path-separator {
+  color: var(--tl-ink-faint);
+}
+
+.tl-intel-loading-block {
+  padding: var(--tl-space-md) 0;
+}
+
+.tl-intel-section-note {
+  margin: var(--tl-space-sm) 0 0;
+  color: var(--tl-ink-secondary);
+  font-size: var(--tl-text-secondary-size);
+}
