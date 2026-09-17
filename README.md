@@ -1,233 +1,191 @@
 # ThreadLine
 
-ThreadLine turns meetings and ongoing work into connected organisational memory - linking entities, history, changes, intelligence, evidence, and follow-up into one evidence-backed view you can actually ask questions of.
+ThreadLine turns meetings and ongoing work into connected organisational memory — linking entities, history, changes, intelligence, evidence rapid, and follow-up into one view you can ask questions of.
 
 It answers the question that meeting notes never do: **"What is the state of this organisation, how did it get here, and what should we do next?"**
 
-ThreadLine is built on a small, durable core: meetings are ingested once, facts are extracted deterministically, entities are resolved against evidence, change and risk are computed from verified state, and every answer is traceable back to the meeting transcripts that support it.
+It does this without pretending to know more than it has been shown. Every fact is extracted deterministically from evidence, every entity is resolved against candidates, every change is derived from verified state transitions, every insight points back to the meetings that support it, and every natural-language answer is grounded in citable evidence. ThreadLine prefers to abstain over speculate — an answer it cannot trace to evidence, it refuses to invent.
 
-![ThreadLine data flow](.threadline/readme-flow.svg)
+## Follow the Thread
 
-## Badges
+The name comes from the central idea: every observation is a point on a thread that runs from a meeting, through an entity, into memory, and back out as change, intelligence, evidence and action.
 
-| Framework | Standard | Lint | Test | E2E | Build |
-|-----------|----------|------|------|-----|-------|
-| Backend | Python 3.12 / FastAPI | ruff 1025 | pytest 1001 passed | 26 Playwright | green |
-| Frontend | React 19 / Vite / TS 6 | tsc clean | vitest 176 passed | | green |
+```mermaid
+flowchart LR
+    M[Meeting] --> O[Observation]
+    O --> E[Entity]
+    E --> Mem[Memory]
+    Mem --> C[Change]
+    C --> I[Intelligence]
+    I --> Ev[Evidence]
+    Ev --> A[Action]
+```
 
 ## What ThreadLine does
 
 | Capability | Purpose |
 |---|---|
-| Meeting intelligence | Ingest meeting transcripts and recover structured, evidence-backed facts. |
-| Information extraction | Deterministically extract issues, tasks, decisions and risks with supporting evidence. |
-| Entity resolution | Resolve mentions to canonical entities via candidates, scoring and a safe resolution decision. |
-| Organisational memory | Maintain durable, tenant-scoped memory of how each entity changed over time. |
-| Change intelligence | Detect insights, changes and their impact across the organisation. |
-| Attention & prioritisation | Score what needs attention now surfaces why, from durable evidence. |
-| Dependency & impact | Infer co-occurrence relationships and cross-entity risk propagation without fabricating dependencies. |
-| Semantic retrieval | Durable, tenant-scoped semantic evidence index over resolved meetings. |
+| Meeting intelligence | Ingest meetings and recover structured, evidence-backed facts. |
+| Information extraction | Deterministically extract issues, tasks, decisions and risks, with supporting evidence. |
+| Entity resolution | Resolve mentions to canonical entities via candidates, scoring and a conservative decision. |
+| Organisational memory | Maintain durable, tenant-scoped memory of how entities changed over time. |
+| Change intelligence | Detect changes, their impact ja, and cross-entity risk without fabricating dependencies. |
+| Attention & impact | Prioritise what needs attention now and explain why, from durable evidence. |
+| Dependency intelligence | Infer co-occurrence relationships and cross-entity risk propagation deterministically. |
+| Semantic retrieval | Durable, tenant-scoped semantic index over resolved evidence. |
 | Natural-language query | Ask questions in plain language; answers are grounded in cited evidence. |
 | Proactive intelligence | Recurring scans surface newly relevant, deterministic signals as they emerge. |
-| Evidence & actions | Link every signal to evidence and recommend concrete next actions. |
+| Evidence & actions | Every insight links back to evidence and recommends concrete next actions. |
 
-## Follow the Thread
-
-The name comes from the central idea: every observation is a point on a thread that runs from a meeting, through an entity, into memory, and back out as change, insight, evidence and action.
-
-```mermaid
-flowchart LR
-    M[Meeting] --> O{Observation}
-    O --> E[Entity]
-    E --> Mem[Memory]
-    Mem --> Ch[Change]
-    Ch --> I[Intelligence]
-    I --> Ev[Evidence]
-    Ev --> A[Action]
-```
+"Ask ThreadLine" is the grounding boundary: a question becomes a retrieval plan, evidence is scored and cited, and the answer is built only on what can be verified. When evidence is insufficient, ThreadLine says so instead of guessing.
 
 ## Ask ThreadLine
-
-Natural-language questions are answered by retrieval and grounding, not by guessing. A valid answer is one you can verify.
 
 ```mermaid
 flowchart LR
     Q[Question] --> R[Evidence retrieval]
-    R --> G[Grounded answer]
-    G --> C[Cited evidence]
+    R --> S[Evidence scoring]
+    S --> A[Grounded answer]
+    A --> C[Cited evidence]
 ```
-
-ThreadLine never pretends to understand language without limits. When the system cannot ground an answer in citable evidence, it says so rather than inventing a confident but unsupported response.
 
 ## Proactive Intelligence
 
-The durable background worker periodically re-evaluates organisation state and flags newly relevant, deterministic signals. This is observation over time, not real-time monitoring and not predictive accuracy.
+ThreadLine's durable worker can periodically re-evaluate organisation state and surface newly relevant deterministic signals. This is a scheduled re-scan of existing evidence, not real-time monitoring or push notifications.
 
 ```mermaid
-flowchart TD
-    S[Organisation state] --> P[Periodic scan]
+flowchart LR
+    S[Organisation state] --> P[Periodic scan job]
     P --> Sig[Signals]
-    Sig --> N[Newly relevant]
+    Sig --> N[Newly relevant signals]
 ```
 
-Proactive scans are off by default and opt-in: set `PROACTIVE_INTELLIGENCE_ENABLED=true`. They reuse the existing deterministic intelligence services - they never call a second engine and never fabricate signals.
+Proactive intelligence is opt-in and off by default (`PROACTIVE_INTELLIGENCE_ENABLED=false`). When enabled, the worker schedules one durable scan job per organisation per interval, and each scan reports only genuinely new, deterministic signals — it never fabricates a discovery.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    U[User] --> R[React + TypeScript]
-    R --> F[FastAPI]
-    F --> DS[Domain services]
-    DS --> SR[Scoped repositories]
-    SR --> SQ[SQLite]
-```
-
-ThreadLine is a **modular monolith** with **durable SQLite** and a **process-local durable worker**. No message broker, no distributed queue, no external cache.
+ThreadLine is a **modular monolith** with a **process-local durable worker** and **durable SQLite** as the source of truth. There is no separate message broker, no external queue, no distributed worker fleet, and no graph database.
 
 ```mermaid
-flowchart LR
-    M[Meeting Processing]
-    M --> X[Extraction]
-    X --> ER[Entity Resolution]
-    ER --> T[Temporal / Memory]
-    T --> I[Intelligence]
-    I --> SI[Semantic Index]
+flowchart TB
+    U[User] --> FE[React + TypeScript]
+    FE --> API[FastAPI]
+    API --> S[Domain & Intelligence Services]
+    S --> R[Tenant-Scoped Repositories]
+    R --> DB[(SQLite)]
+
+    WORK[Process-Local Worker] --> S
+    J[Background Jobs] --> WORK
+    SEM[Semantic Index] --> API
 ```
 
-```mermaid
-flowchart LR
-    J[Durable jobs] --> W[Worker]
-    W --> P[Processing]
-    P --> PI[Proactive intelligence]
-```
+Domain state, derived intelligence, semantic retrieval evidence, and durable jobs all live in one process boundary. The worker derives its organisation scope from the durable job it executes, never from request state, so tenancy is preserved as work moves off the request path.
 
-The architecture principles are deliberately simple:
+### How intelligence is derived, not invented
 
-- SQLite is the durable source of organisational state.
-- Derived intelligence (insights, memory, relationships, attention) is computed from source state, never the other way round.
-- Tenant isolation is enforced at the repository boundary; every read and write carries the organisation scope.
-- Background jobs are durable in SQLite and survive restarts.
-- The worker derives the organisation scope from the durable job itself, never from request state.
-- Semantic retrieval is derived data; the semantic index is rebuildable from durable mentions.
-- LLM output never becomes organisational truth - it is treated as candidate evidence subject to resolution.
+- **Durable source first.** SQLite is the durable source of organisational state — meetings, entities, mentions and background jobs.
+- **Derived, rebuildable views.** Changes, memory, insights, attention, relationships, impacts and the semantic index are computed deterministically from source state. Losing them never loses source data; they rebuild from it.
+- **Evidence-backed.** Every insight and every natural-language answer links to the evidence that supports it, and every answer carries citations back to the transcript.
+- **Tenancy at the boundary.** Repositories enforce organisation scope on every read and write; tenant isolation is structural, not a route-level convention.
+- **Deterministic and read-only intelligence.** The intelligence services never mutate entities or fabricate facts; they compute from verified state and abstain when evidence is ambiguous.
 
-## Evidence-first intelligence
+## Security & tenancy
 
-Every signal, insight and answer in ThreadLine connects back to the evidence that supports it. A timeline is only as trustworthy as the observations it was built from.
-
-```mermaid
-flowchart TD
-    Sig[Signal] --> Ent[Entity]
-    Ent --> Meet[Meeting]
-    Meet --> Evid[Evidence]
-```
-
-This is not a claim of perfection: ThreadLine is precise about what it knows and honest about what it does not. It prefers to abstain (return UNRESOLVED / AMBIGUOUS) rather than guess, and it refuses to present a fabricated dependency as fact.
+- **Authenticated sessions** — server-side opaque sessions with hashed tokens and expiry; no default or hardcoded credentials.
+- **Organisation-scoped access** — members select their organisation via header, and membership is checked against real organisation state, never trusted blindly.
+- **Tenant isolation at the repository boundary** — every repository operation carries the organisation scope; objects outside that scope read as `404`, not as a cross-tenant existence oracle.
+- **Role-aware permissions** — central role policy (`AUTH_ROLE_PERMISSIONS`) distinguishes `OWNER`, `ADMIN` and `MEMBER`.
+- **Tenant-scoped semantic retrieval** — vector search and the semantic index are scoped to the requesting organisation.
+- **Durable job tenancy** — background jobs carry and derive their organisation scope from the durable job row, never from request state.
+- **Login throttling** — repeated failed logins are rate-limited to resist brute force and credential stuffing.
+- **Query rate limiting** — expensive natural-language query endpoints are rate-limited per user on a sliding window, returning `429` with a `Retry-After` header.
 
 ## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Backend runtime | Python 3.12, FastAPI, Pydantic 2, Uvicorn |
-| Storage | SQLite (durable source + durable jobs) |
-| Extraction | Provider abstraction: OpenAI GPT-4o or deterministic fake |
-| Embeddings | Provider abstraction: OpenAI or fake, representation-versioned |
-| Semantic index | Durable, tenant-scoped JSON index (derived, rebuildable) |
-| Natural-language query | Retrieval + grounding, evidence-cited answers |
-| Proactive intelligence | Durable scan jobs on the process-local worker |
-| Frontend | React 19, TypeScript, Vite, React Query, react-router |
-| Testing | pytest (backend), Vitest + Testing Library (frontend), Playwright (E2E + axe) |
-| CI / ops | GitHub Actions, uvicorn, nginx/Caddy reverse proxy |
+| Backend | Python 3.12, FastAPI, Pydantic, SQLite |
+| Provider abstraction | Deterministic fake + OpenAI extraction; fake + OpenAI embeddings |
+| Background | Process-local durable worker over background jobs |
+| Frontend | React 19, TypeScript, Vite, TanStack Query |
+| Testing | Pytest (backend), Vitest (frontend), Playwright (E2E), ruff (lint) |
+| CI | GitHub Actions (`CI` workflow) |
+
+Only tools actually in the repository are listed.
 
 ## Project structure
 
 ```text
 app/
-  api/              FastAPI routers (auth, orgs, meetings, entities,
-                    query, intelligence, jobs, attention, changes, portfolio)
-  services/         Domain logic: extraction, resolution, temporal, memory,
-                    insights, attention, correlation, impact, NL query,
-                    proactive intelligence, rate limiting
-  repositories/     Scoped (tenant-isolated) data access
-  persistence/      SQLite store + migrations (schema v1-v6)
-  providers/        Extraction / NL / embedding provider abstraction
-  models/           Internal domain models
-  schemas/          Stable public API schemas
-  core/             Config (pydantic-settings)
+  api/                FastAPI route modules (meetings, entities, auth, orgs,
+                      query, intelligence, changes, jobs, attention)
+  core/               Configuration (pydantic-settings, .env)
+  models/             Internal domain models
+  persistence/        SQLite store + schema migrations
+  providers/          Provider abstractions (extraction, embeddings)
+  repositories/       Tenant-scoped data access
+  schemas/            API request/response schemas
+  services/           Domain services: extraction, resolution, temporal,
+                      memory, intelligence, attention, correlation,
+                      semantic indexing, natural-language query
+  api/query.py        Natural-language question + evidence retrieval
+  api/intelligence.py Proactive intelligence scan status
+  main.py             FastAPI app, router wiring, worker lifecycle
 
 frontend/
-  src/              React app: auth, meetings, entities, intelligence,
-                    ask, dashboard, attention
-  e2e/              Playwright end-to-end tests
+  src/features/       React feature modules (meetings, entities, intelligence,
+                      ask, actions, auth)
+  src/test/           Frontend tests
+  e2e/                Playwright end-to-end tests
 
-tests/              Backend pytest suite
-scripts/            Operational helpers (e.g. smoke checks)
-.github/workflows/  CI (frontend, backend, browser)
+tests/                Backend test suite
+scripts/              Operational scripts
+DEPLOYMENT.md         Deployment, configuration and operations guide
 ```
 
-## Security & tenancy
+## Getting started
 
-- Authenticated sessions with server-side opaque tokens; passwords are PBKDF2-HMAC-SHA256 with per-user salts (no default credentials anywhere).
-- Organisation-scoped access; every query carries the organisation scope and tenant isolation is enforced at the repository boundary.
-- Role-aware permissions (`OWNER` / `ADMIN` / `MEMBER`) with a central permission policy.
-- Tenant-scoped semantic retrieval; semantic index records are organisation-scoped and cross-tenant reads return `404` (no existence oracle).
-- Durable background jobs carry organisation scope, so the worker never crosses tenants.
-- Login is throttled (per-email rate limit) and the query API is rate-limited per user on a sliding window.
-- Logging never includes tokens, transcripts or secrets.
+### Prerequisites
 
-ThreadLine is a young, single-node system. It documents what it verifies and does not over-claim.
+- Python 3.12+
+- Node.js 22+
+- `pip` and `npm`
 
-## Deployment
-
-Current deployment model is **single-node**: a reverse proxy in front of the production frontend build, proxying `/api/*` to a single FastAPI process over durable SQLite, with a process-local durable worker.
-
-```mermaid
-flowchart LR
-    RP[Reverse proxy] --> FE[Frontend]
-    FE --> API[FastAPI]
-    API --> SQL[SQLite]
-    API --> W[Worker]
-```
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the full runtime model, environment configuration, security and operations guidance.
-
-## Quick start
-
-### 1. Clone and create a virtual environment
+### 1. Create a virtual environment and install dependencies
 
 ```bash
-git clone https://github.com/VIVEK-MARRI/ThreadLine.git
-cd ThreadLine
-
+python -m venv .venv
 # Windows
-python -m venv .venv && .venv\Scripts\activate
-
+.venv\Scripts\activate
 # macOS / Linux
-python3 -m venv .venv && source .venv/bin/activate
-```
+source .venv/bin/activate
 
-### 2. Install backend dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure the provider (optional for real extractions)
+### 2. Configure the LLM provider (optional)
 
-Copy `.env.example` to `.env` and set `EXTRACTION_PROVIDER=openai` with an `OPENAI_API_KEY` to use real LLM extraction. No key? Set `EXTRACTION_PROVIDER=fake` - the API runs and the endpoint structure works without any LLM calls.
+Copy `.env.example` to `.env`. ThreadLine runs without any LLM key using its deterministic fake providers:
 
-### 4. Run the backend
+```env
+EXTRACTION_PROVIDER=fake        # "fake" (no key) or "openai"
+NL_PROVIDER=fake                # "fake" or "openai"
+SEMANTIC_INDEX_BACKEND=in_memory
+```
+
+Set `EXTRACTION_PROVIDER=openai` and add `OPENAI_API_KEY` only when you want real extractions. Everything else works out of the box.
+
+### 3. Run the backend
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-The API is served at `http://localhost:8000` with interactive docs at `/docs`.
+The API is served at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
 
-### 5. Bootstrap the first organisation and owner
+### 4. Bootstrap the first organisation and owner
 
-While no users exist, `POST /api/v1/auth/bootstrap` is open so the first owner can be created. The moment the first owner exists, anonymous access ends - there is no default password.
+While no users exist, the API is open for the first owner through `POST /api/v1/auth/bootstrap`. The moment the first owner exists, anonymous access ends permanently — ThreadLine has no default admin and no default password.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
@@ -236,55 +194,55 @@ curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
        "admin_email": "owner@acme.example", "password": "<your-strong-password>"}'
 ```
 
-Then log in and call tenant-scoped endpoints with the bearer token, selecting your organisation via the `X-Organisation-ID` header. Set `AUTH_OPEN_BOOTSTRAP=false` after the first owner is created.
+Then log in, and call tenant-scoped endpoints with the bearer token, selecting your organisation via the `X-Organisation-ID` header.
 
-### 6. Run the frontend
+### 5. Run the frontend
 
 ```bash
 cd frontend
 npm ci
-npm run dev        # dev server proxies /api and /health to the backend
+npm run dev          # proxies /api to the backend on :8000
 ```
 
 ## Testing
 
 ```bash
-# Backend (no LLM key needed - extraction tests use a fake provider)
+# Backend — no LLM key needed (extraction tests use a fake provider)
 python -m pytest -q
 
-# Frontend
+# Frontend — typecheck, unit tests, production build
 cd frontend
-npx tsc --noEmit    # typecheck
-npm test            # unit tests (Vitest)
-npm run build       # production build
-npm run test:e2e    # Playwright end-to-end (26 tests)
+npx tsc --noEmit
+npm test
+npm run build
+
+# End-to-end (Playwright against the built frontend + real backend)
+npm run test:e2e
 ```
 
 ## API overview
 
-All routes are versioned under `/api/v1` and require authentication (tenant-scoped).
+All routes live under `/api/v1` and require authentication. A few highlights:
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/v1/auth/bootstrap` | Create the first organisation + owner (open only while userless) |
-| POST | `/api/v1/auth/login` / `logout` | Authenticate / end a session |
+| POST | `/api/v1/auth/bootstrap` | Create the first organisation + owner while userless |
+| POST | `/api/v1/auth/login` / `logout` | Log in / end a session |
 | POST | `/api/v1/meetings` | Ingest a meeting |
 | POST | `/api/v1/meetings/{id}/extract` | Extract structured facts |
 | POST | `/api/v1/entities` | Create a canonical entity |
-| GET | `/api/v1/entities` | List entities |
-| GET | `/api/v1/entities/{id}/insights` | Entity insights & change detection |
-| GET | `/api/v1/entities/{id}/temporal` | Temporal state & timeline |
-| GET | `/api/v1/entities/{id}/memory` | Organisational memory |
-| GET | `/api/v1/entities/{id}/relationships` | Relationship intelligence |
-| GET | `/api/v1/entities/{id}/impacts` | Cross-entity risk propagation |
-| POST | `/api/v1/query` | Ask ThreadLine (evidence-grounded answers) |
-| POST | `/api/v1/query/evidence` | Evidence-only retrieval |
+| GET | `/api/v1/entities/{id}/insights` | Entity insights, memory, change & attention |
+| POST | `/api/v1/entities/mentions` | Register a mention |
+| POST | `/api/v1/query` | Ask a natural-language question (grounded answers) |
+| POST | `/api/v1/query/evidence` | Retrieve cited evidence for a question |
 | GET | `/api/v1/intelligence/scan-status` | Proactive scan status |
-| GET | `/health` | Health check |
+| GET | `/api/v1/changes/summary` | Organisation change summary |
+| GET | `/api/v1/attention` | Attention & prioritisation |
+| GET | `/api/v1/portfolio` | Portfolio intelligence |
+| GET | `/health` | Liveness |
 
-## Learn more
+## Documentation
 
-- [DEPLOYMENT.md](DEPLOYMENT.md) - production runtime, configuration, backup, operations
-- [.env.example](.env.example) - all environment options
-- `STAGE_34_FINAL_REPORT.md` - latest security hardening, proactive intelligence and rate-limiting work
-- [CONTRIBUTING / design notes](.agent/skills/ui-ux-pro-max/SKILL.md) - optional; ThreadLine does not require agent skills to run or test
+- [DEPLOYMENT.md](DEPLOYMENT.md) — deployment model, configuration, and operations
+- [.env.example](.env.example) — all configuration options
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — the CI workflow (backend, frontend, browser)
