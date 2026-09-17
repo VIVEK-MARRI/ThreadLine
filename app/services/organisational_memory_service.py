@@ -52,9 +52,7 @@ Raised exceptions (caught and translated to HTTP errors by the API layer):
 import logging
 from collections import defaultdict
 
-from app.models.entity import EntityType
 from app.models.memory import EntityMemory, EntityMemoryFact, MemoryFactType
-from app.models.temporal import TemporalState
 from app.repositories.entity_repository import AbstractEntityRepository
 from app.repositories.meeting_repository import AbstractMeetingRepository
 from app.repositories.mention_repository import AbstractMentionRepository

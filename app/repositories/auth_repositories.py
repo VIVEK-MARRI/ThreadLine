@@ -83,6 +83,14 @@ class AbstractAuthRepository(ABC):
     def update_organisation(self, organisation: Organisation) -> Organisation: ...
     @abstractmethod
     def delete_organisation(self, organisation_id: str) -> None: ...
+    @abstractmethod
+    def list_organisation_ids(self, *, active_only: bool = True) -> list[str]:
+        """Return organisation IDs for proactive scheduler discovery (Stage 34).
+
+        Sorted deterministically.  IDs only — the scheduler needs scope
+        keys, never full rows.
+        """
+        ...
 
     # -- memberships ----------------------------------------------------
     @abstractmethod
@@ -224,6 +232,17 @@ class InMemoryAuthRepository(AbstractAuthRepository):
             self._slug_index.pop(org.slug.strip().lower(), None)
             for key in [k for k in self._members if k[0] == organisation_id]:
                 del self._members[key]
+
+    def list_organisation_ids(self, *, active_only: bool = True) -> list[str]:
+        from app.auth.models import OrganisationStatus
+
+        with self._lock:
+            ids = [
+                org_id
+                for org_id, org in self._orgs.items()
+                if not active_only or org.status == OrganisationStatus.ACTIVE
+            ]
+        return sorted(ids)
 
     # -- memberships ----------------------------------------------------
     def add_member(self, member: OrganisationMember) -> OrganisationMember:
@@ -502,6 +521,20 @@ class SQLiteAuthRepository(AbstractAuthRepository):
             connection.execute(
                 "DELETE FROM organisations WHERE organisation_id = ?", (organisation_id,)
             )
+
+    def list_organisation_ids(self, *, active_only: bool = True) -> list[str]:
+        from app.auth.models import OrganisationStatus
+
+        if active_only:
+            rows = self._store._connection.execute(
+                "SELECT organisation_id FROM organisations WHERE status = ? ORDER BY organisation_id",
+                (OrganisationStatus.ACTIVE.value,),
+            ).fetchall()
+        else:
+            rows = self._store._connection.execute(
+                "SELECT organisation_id FROM organisations ORDER BY organisation_id"
+            ).fetchall()
+        return [row[0] for row in rows]
 
     # -- memberships ----------------------------------------------------
     def add_member(self, member: OrganisationMember) -> OrganisationMember:

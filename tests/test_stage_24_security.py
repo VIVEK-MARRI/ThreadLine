@@ -724,13 +724,14 @@ def test_s24_migration_v4_to_v5_preserves_data_in_bootstrap_org(tmp_path):
         ALTER TABLE entity_mentions DROP COLUMN organisation_id;
         ALTER TABLE dependencies DROP COLUMN organisation_id;
         ALTER TABLE background_jobs DROP COLUMN organisation_id;
+        ALTER TABLE background_jobs DROP COLUMN result_summary;
         DROP TABLE organisation_members;
         DROP TABLE auth_sessions;
         DROP TABLE auth_login_attempts;
         DROP TABLE security_events;
         DROP TABLE users;
         DROP TABLE organisations;
-        DELETE FROM schema_version WHERE version = 5;
+        DELETE FROM schema_version WHERE version IN (5, 6);
         """
     )
     seed._connection.commit()
@@ -739,13 +740,21 @@ def test_s24_migration_v4_to_v5_preserves_data_in_bootstrap_org(tmp_path):
 
     store = SQLiteSourceStore(legacy)
     try:
-        assert store.migration_version() == SCHEMA_VERSION == 5
+        assert store.migration_version() == SCHEMA_VERSION == 6
         meeting_row = store._connection.execute(
             "SELECT organisation_id, source_revision FROM meetings WHERE meeting_id = 'm-legacy'").fetchone()
         assert tuple(meeting_row) == ("default", 2)
         entity_row = store._connection.execute(
             "SELECT organisation_id FROM entities WHERE entity_id = 'e-legacy'").fetchone()
         assert entity_row[0] == "default"
+        # Stage 34 v6: scan-result column rides the same migration chain.
+        job_cols = {
+            row[1]
+            for row in store._connection.execute(
+                "PRAGMA table_info(background_jobs)"
+            ).fetchall()
+        }
+        assert "result_summary" in job_cols
         assert store._connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         store.close()

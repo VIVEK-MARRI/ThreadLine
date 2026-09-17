@@ -33,7 +33,9 @@ order (both source 1) but DISTINCT in identity.
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RevisionMismatchError(Exception):
@@ -59,7 +61,7 @@ class FutureRevisionError(RevisionMismatchError):
     """
 
 
-def parse_source_revision(processing_revision: Optional[str]) -> Optional[int]:
+def parse_source_revision(processing_revision: str | None) -> int | None:
     """Extract the deterministic source revision from a processing revision.
 
     "<N>" -> N, "<N>@<suffix>" -> N, "<N>:<suffix>" -> N, None -> None.
@@ -89,7 +91,7 @@ def parse_source_revision(processing_revision: Optional[str]) -> Optional[int]:
     return value if value >= 1 else None
 
 
-def processing_revision_for(source_revision: int, suffix: Optional[str] = None) -> str:
+def processing_revision_for(source_revision: int, suffix: str | None = None) -> str:
     """Build a deterministic processing revision tied to a source revision."""
     base = str(int(source_revision))
     if suffix:
@@ -97,7 +99,7 @@ def processing_revision_for(source_revision: int, suffix: Optional[str] = None) 
     return base
 
 
-def compare_source_orders(first: Optional[int], second: Optional[int]) -> str:
+def compare_source_orders(first: int | None, second: int | None) -> str:
     """Total order over parsed source revisions.
 
     Returns "OLDER", "EQUAL", "NEWER", or "INCOMPARABLE" (either side
@@ -116,7 +118,7 @@ def compare_source_orders(first: Optional[int], second: Optional[int]) -> str:
     return "EQUAL"
 
 
-def compare_processing_revisions(first: Optional[str], second: Optional[str]) -> str:
+def compare_processing_revisions(first: str | None, second: str | None) -> str:
     """Order two processing-revision identities by their source order.
 
     Suffixes affect identity only, never order: "1@A" vs "1@B" is EQUAL.
@@ -139,14 +141,14 @@ def get_consistency_status(
     is_current=False (except when there is legitimately no source at all).
     """
     meeting = meeting_repository.get_by_id(meeting_id) if meeting_repository is not None else None
-    source_revision: Optional[int] = None
+    source_revision: int | None = None
     if meeting is not None:
         try:
             source_revision = int(getattr(meeting, "source_revision", 1) or 1)
         except (TypeError, ValueError):
             source_revision = 1
 
-    extraction_revision: Optional[int] = None
+    extraction_revision: int | None = None
     if extraction_repository is not None:
         try:
             extraction = extraction_repository.get_by_meeting_id(meeting_id)
@@ -158,8 +160,8 @@ def get_consistency_status(
     # Current derived processing revision = highest source revision among
     # SUCCEEDED jobs for this meeting.  History is preserved; we never delete
     # old jobs to make current processing look easier.
-    derived_revision: Optional[int] = None
-    derived_job_id: Optional[str] = None
+    derived_revision: int | None = None
+    derived_job_id: str | None = None
     processing_complete = False
     if job_repository is not None and meeting is not None:
         try:
@@ -180,14 +182,24 @@ def get_consistency_status(
                 succeeded.sort()
                 derived_revision, derived_job_id = succeeded[-1]
                 processing_complete = derived_revision == source_revision
-        except Exception:
+        # Job-history scan fails safe: repository domain errors (KeyError /
+        # ValueError incl. InvalidJobTransition) or malformed job shapes.
+        # Fallback preserved (derived stays None → reported INCOMPLETE).
+        # Only the meeting id is logged — never job payloads or revisions
+        # beyond the deterministic integers already exposed by this contract.
+        except (KeyError, ValueError, TypeError, AttributeError):
+            logger.debug(
+                "processing_consistency: SUCCEEDED-job scan failed for "
+                "meeting %s; reporting derived revision as unknown.",
+                meeting_id,
+            )
             derived_revision = None
 
     # Current semantic evidence revision: only current when every
     # meeting-attributed record agrees on the same source revision.
     # Mixed revisions (e.g. rev 1 + rev 2) → semantic is NOT current:
     # stale rev-1 records would masquerade as current alongside rev-2.
-    semantic_revision: Optional[int] = None
+    semantic_revision: int | None = None
     if semantic_repository is not None:
         try:
             revisions: list[int] = []
@@ -245,8 +257,14 @@ def get_consistency_status(
                     failed_for_current = True
                 elif job.status in {_S.PENDING, _S.RUNNING, _S.RETRY_WAITING}:
                     pending_for_current = True
-        except Exception:
-            pass
+        # Lifecycle scan fails safe under the same contract as above;
+        # flags keep their defaults (→ INCOMPLETE/STALE, never CURRENT).
+        except (KeyError, ValueError, TypeError, AttributeError):
+            logger.debug(
+                "processing_consistency: lifecycle scan failed for meeting "
+                "%s; keeping default lifecycle flags.",
+                meeting_id,
+            )
     if is_current:
         status_label = "CURRENT"
     elif failed_for_current:
@@ -268,8 +286,14 @@ def get_consistency_status(
             for mention in mention_repository.list_by_meeting_id(meeting_id):
                 if int(getattr(mention, "source_revision", 1) or 1) != source_revision:
                     stale_mentions += 1
-        except Exception:
-            pass
+        # Mention scan fails safe: unreadable mention rows leave the stale
+        # count at its conservative default (0) rather than failing status.
+        except (KeyError, ValueError, TypeError, AttributeError):
+            logger.debug(
+                "processing_consistency: mention scan failed for meeting %s; "
+                "keeping stale-mention count at 0.",
+                meeting_id,
+            )
 
     return {
         "meeting_id": meeting_id,

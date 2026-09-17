@@ -253,6 +253,17 @@ function changesStub(overrides: Record<string, (query: string) => Response | nul
     if (pathname === "/api/v1/attention") return jsonResponse(200, ATTENTION);
     if (pathname === "/api/v1/portfolio") return jsonResponse(200, PORTFOLIO);
     if (pathname === "/api/v1/meetings") return jsonResponse(200, MEETINGS);
+    if (pathname === "/api/v1/intelligence/scan-status") {
+      return jsonResponse(200, {
+        scanned: true,
+        completed_at: "2026-09-13T10:00:00Z",
+        watermark: 1,
+        signal_count: 0,
+        new_signal_count: 0,
+        new_signal_ids: [],
+        truncated: false,
+      });
+    }
     if (pathname === "/api/v1/changes") {
       if (overrides[pathname]) return overrides[pathname](query);
       const params = new URLSearchParams(query);
@@ -717,6 +728,7 @@ describe("intelligence workspace", () => {
       "Repeated signals",
       "Dependency and impact movement",
       "Recent movement",
+      "Proactive scan",
       "Where follow-up exists",
     ]);
   });

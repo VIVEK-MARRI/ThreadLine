@@ -20,7 +20,7 @@ Design:
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable
 
 from app.models.natural_language import EvidenceItem
 from app.models.semantic_index import SemanticIndexRecord
@@ -153,14 +153,18 @@ class SemanticIndexingService:
             current_meeting_rev = self._current_revision_lookup(resolved_meeting_id)
             if current_meeting_rev is not None:
                 if incoming_revision < current_meeting_rev:
-                    from app.repositories.background_job_repository import StaleJobOwnershipError
+                    from app.repositories.background_job_repository import (
+                        StaleJobOwnershipError,
+                    )
 
                     raise StaleJobOwnershipError(
                         f"stale semantic write rejected for {evidence_item.evidence_id}: "
                         f"incoming revision {incoming_revision} < authoritative meeting revision {current_meeting_rev}"
                     )
                 if incoming_revision > current_meeting_rev:
-                    from app.services.processing_consistency_service import FutureRevisionError
+                    from app.services.processing_consistency_service import (
+                        FutureRevisionError,
+                    )
 
                     raise FutureRevisionError(
                         f"future semantic write rejected for {evidence_item.evidence_id}: "
@@ -184,7 +188,9 @@ class SemanticIndexingService:
                 )
                 return existing
             if existing_revision is not None and int(incoming_revision) < int(existing_revision):
-                from app.repositories.background_job_repository import StaleJobOwnershipError
+                from app.repositories.background_job_repository import (
+                    StaleJobOwnershipError,
+                )
 
                 raise StaleJobOwnershipError(
                     f"stale semantic write rejected for {evidence_item.evidence_id}: "
@@ -203,7 +209,9 @@ class SemanticIndexingService:
         if existing is not None and incoming_revision is not None:
             existing_revision = getattr(existing, "source_revision", None)
             if existing_revision is not None and int(incoming_revision) < int(existing_revision):
-                from app.repositories.background_job_repository import StaleJobOwnershipError
+                from app.repositories.background_job_repository import (
+                    StaleJobOwnershipError,
+                )
 
                 raise StaleJobOwnershipError(
                     f"stale semantic write rejected for {evidence_item.evidence_id}: "
@@ -389,7 +397,7 @@ class SemanticIndexingService:
 
     def check_consistency(
         self,
-        source_evidence: Optional[list[EvidenceItem]] = None,
+        source_evidence: list[EvidenceItem] | None = None,
     ) -> dict:
         """Diagnostic check of index consistency.
 

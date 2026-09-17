@@ -53,8 +53,6 @@ Note on ENTITY vs ORGANISATION intents:
 """
 
 import logging
-import re
-from typing import Optional
 
 from app.models.natural_language import QueryIntent
 

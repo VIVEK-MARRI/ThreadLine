@@ -15,7 +15,6 @@ EXTRACTION_PROVIDER  Which provider to activate: "openai" (default) or
                      tests without a real API key).
 """
 
-from typing import Optional
 
 from pydantic import ConfigDict, field_validator
 from pydantic_settings import BaseSettings
@@ -35,7 +34,7 @@ class Settings(BaseSettings):
     # openai_api_key is Optional so the application starts successfully
     # even when no key is configured.  The error surfaces at call time
     # with a clear ExtractionProviderNotConfiguredError.
-    openai_api_key: Optional[str] = None
+    openai_api_key: str | None = None
     openai_model: str = "gpt-4o"
 
     # Which extraction provider to use.  Recognised values: "openai", "fake".
@@ -59,6 +58,20 @@ class Settings(BaseSettings):
     background_lease_seconds: int = 60
 
     # ------------------------------------------------------------------
+    # Stage 34 proactive intelligence scheduler settings
+    # ------------------------------------------------------------------
+    # Master switch for the recurring ORGANISATION_INTELLIGENCE_SCAN tick.
+    # Off by default: scans only run when a deployer explicitly enables
+    # them.  Enabling never changes query semantics — it only makes the
+    # existing deterministic intelligence durable-ahead-of-query.
+    proactive_intelligence_enabled: bool = False
+    # Seconds between scheduler ticks that enqueue per-organisation scans.
+    # Must be positive (zero/unbounded intervals are rejected); the
+    # scheduler additionally refuses to run more often than the worker
+    # poll cadence allows.  Production guidance: 1800–7200.
+    proactive_intelligence_interval_seconds: float = 3600.0
+
+    # ------------------------------------------------------------------
     # Stage 24 authentication / tenant isolation settings
     # ------------------------------------------------------------------
     # Lifetime of an opaque server-side session token, in seconds.
@@ -75,6 +88,18 @@ class Settings(BaseSettings):
     # per email within the window before further attempts get HTTP 429.
     auth_rate_limit_max_attempts: int = 5
     auth_rate_limit_window_seconds: int = 900
+
+    # ------------------------------------------------------------------
+    # Stage 34 expensive-endpoint rate limiting (process-local)
+    # ------------------------------------------------------------------
+    # POST /api/v1/query and POST /api/v1/query/evidence share one
+    # per-principal sliding window: at most this many requests per window.
+    # The limiter is keyed by authenticated user id (anonymous bootstrap
+    # callers fall back to client IP).  Single-node only: each process
+    # enforces its own window (see DEPLOYMENT.md).  Conservative defaults:
+    # interactive use never notices; tight loops and accidents get 429.
+    query_rate_limit_requests: int = 60
+    query_rate_limit_window_seconds: float = 60.0
 
     @field_validator(
         "source_repository_backend",
@@ -110,6 +135,7 @@ class Settings(BaseSettings):
         "background_poll_interval_seconds",
         "background_max_attempts",
         "background_lease_seconds",
+        "proactive_intelligence_interval_seconds",
     )
     @classmethod
     def positive_worker_setting(cls, value):
@@ -122,11 +148,19 @@ class Settings(BaseSettings):
         "auth_pbkdf2_iterations",
         "auth_rate_limit_max_attempts",
         "auth_rate_limit_window_seconds",
+        "query_rate_limit_requests",
     )
     @classmethod
     def positive_auth_setting(cls, value):
         if value <= 0:
             raise ValueError("auth settings must be positive")
+        return value
+
+    @field_validator("query_rate_limit_window_seconds")
+    @classmethod
+    def positive_query_window(cls, value):
+        if value <= 0:
+            raise ValueError("query rate-limit window must be positive")
         return value
 
     model_config = ConfigDict(

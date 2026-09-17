@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +12,7 @@ class BackgroundJobType(str, Enum):
     MEETING_PROCESSING = "MEETING_PROCESSING"
     DERIVED_INTELLIGENCE_REBUILD = "DERIVED_INTELLIGENCE_REBUILD"
     SEMANTIC_INDEXING = "SEMANTIC_INDEXING"
+    ORGANISATION_INTELLIGENCE_SCAN = "ORGANISATION_INTELLIGENCE_SCAN"
 
 
 class BackgroundJobStatus(str, Enum):
@@ -32,16 +32,27 @@ class BackgroundJob(BaseModel):
     created_at: datetime
     payload_id: str = ""
     max_attempts: int = Field(default=3, ge=1)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    next_retry_at: Optional[datetime] = None
-    lease_until: Optional[datetime] = None
-    worker_id: Optional[str] = None
-    stage: Optional[str] = None
-    error_type: Optional[str] = None
-    last_error: Optional[str] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    lease_until: datetime | None = None
+    worker_id: str | None = None
+    stage: str | None = None
+    error_type: str | None = None
+    last_error: str | None = None
     attempts: int = Field(default=0, ge=0)
-    processing_revision: Optional[str] = None
+    processing_revision: str | None = None
+    result_summary: str | None = Field(
+        default=None,
+        description=(
+            "Opaque durable result payload (Stage 34): JSON scan summary for "
+            "ORGANISATION_INTELLIGENCE_SCAN jobs (observed source watermark, "
+            "deterministic signal IDs, new-signal IDs, completion time). "
+            "Written by the scan handler before success; read by the "
+            "scan-status endpoint and by later scans for new-signal diffing. "
+            "None for all other job types."
+        ),
+    )
     organisation_id: str = Field(
         default=DEFAULT_ORGANISATION_ID,
         description=(
@@ -52,6 +63,6 @@ class BackgroundJob(BaseModel):
     )
 
     @property
-    def error(self) -> Optional[str]:
+    def error(self) -> str | None:
         """Compatibility view for the Stage 22 in-process service."""
         return self.last_error

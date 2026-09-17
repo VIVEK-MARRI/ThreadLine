@@ -12,7 +12,7 @@ from threading import RLock
 from typing import Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class SQLiteSourceStore:
@@ -281,6 +281,20 @@ class SQLiteSourceStore:
                     """
                 )
                 connection.execute("INSERT INTO schema_version(version) VALUES (5)")
+            if current < 6:
+                # Stage 34 proactive intelligence.  Durable per-scan result
+                # payload on the job row itself (no new tables): the scan
+                # handler writes a JSON summary (observed source watermark,
+                # deterministic signal IDs, new-signal IDs) via
+                # record_scan_result; later scans and the scan-status
+                # endpoint read it back.  Nullable TEXT: pre-Stage-34 rows
+                # and readers stay valid; absence of a summary simply means
+                # "no scan result recorded".
+                connection.execute(
+                    "ALTER TABLE background_jobs ADD COLUMN result_summary TEXT"
+                )
+                connection.execute("INSERT INTO schema_version(version) VALUES (6)")
+                current = 6
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

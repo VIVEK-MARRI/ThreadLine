@@ -4,36 +4,37 @@ Wires together configuration, routers, and middleware.
 Keep this file thin — it delegates everything to the api layer.
 """
 
-from datetime import datetime, timezone
+import logging
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 
-from app.core.config import settings
-from app.api.auth import router as auth_router
-from app.api.organisations import router as organisations_router
-from app.api.meetings import router as meetings_router
-from app.api.entities import router as entities_router
+logger = logging.getLogger(__name__)
+
 from app.api.attention import router as attention_router
-from app.api.portfolio import router as portfolio_router
+from app.api.auth import router as auth_router
 from app.api.changes import router as changes_router
-from app.api.query import router as query_router
+from app.api.entities import router as entities_router
+from app.api.intelligence import router as intelligence_router
+from app.api.jobs import get_job_repository
 from app.api.jobs import router as jobs_router
-from app.schemas.meeting import HealthResponse
-from app.api.meetings import get_source_store, get_meeting_repository
+from app.api.meetings import get_meeting_repository, get_source_store
+from app.api.meetings import router as meetings_router
+from app.api.organisations import router as organisations_router
+from app.api.portfolio import router as portfolio_router
 from app.api.query import _semantic_repository
-from app.api.jobs import get_job_repository
+from app.api.query import router as query_router
+from app.core.config import settings
 from app.models.background_job import BackgroundJobType
-from app.services.background_worker_service import BackgroundWorkerService
-from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
-from app.api.query import _semantic_repository
-from app.api.jobs import get_job_repository
-from app.models.background_job import BackgroundJobType
-from app.services.background_worker_service import BackgroundWorkerService
-from app.services.meeting_processing_service import MeetingProcessingService, ProcessingStage
-from app.api.meetings import get_source_store, get_meeting_repository
 from app.repositories.background_job_repository import StaleJobOwnershipError
+from app.schemas.meeting import HealthResponse
+from app.services.background_worker_service import BackgroundWorkerService
+from app.services.meeting_processing_service import (
+    MeetingProcessingService,
+    ProcessingStage,
+)
 
 _application_worker: BackgroundWorkerService | None = None
 _worker_thread: threading.Thread | None = None
@@ -51,7 +52,9 @@ def _build_tenant_graph(organisation_id: str) -> dict:
     from app.api.auth import _tenant_repos
     from app.api.meetings import _extraction_provider
     from app.api.query import _embedding_provider
-    from app.entity_resolution.lexical_candidate_generator import LexicalCandidateGenerator
+    from app.entity_resolution.lexical_candidate_generator import (
+        LexicalCandidateGenerator,
+    )
     from app.entity_resolution.lexical_candidate_scorer import LexicalCandidateScorer
     from app.entity_resolution.resolution_policy import ThresholdResolutionPolicy
     from app.services.action_recommendation_service import ActionRecommendationService
@@ -67,10 +70,10 @@ def _build_tenant_graph(organisation_id: str) -> dict:
     from app.services.impact_analysis_service import ImpactAnalysisService
     from app.services.insight_service import InsightService
     from app.services.meeting_pipeline_orchestrator import MeetingPipelineOrchestrator
-    from app.services.organisational_memory_service import OrganisationalMemoryService
     from app.services.organisation_change_intelligence_service import (
         OrganisationChangeIntelligenceService,
     )
+    from app.services.organisational_memory_service import OrganisationalMemoryService
     from app.services.portfolio_intelligence_service import PortfolioIntelligenceService
     from app.services.resolution_service import ResolutionService
     from app.services.semantic_indexing_service import SemanticIndexingService
@@ -249,6 +252,16 @@ def _build_tenant_graph(organisation_id: str) -> dict:
         "repos": repos,
         "pipeline": pipeline,
         "extraction_service": extraction_service,
+        # Stage 34: the same already-built deterministic intelligence
+        # services, exposed for the proactive scan handler.  No second
+        # engine — the scanner invokes these exact instances.
+        "intelligence": {
+            "changes": changes,
+            "attention": attention,
+            "insights": insights,
+            "actions": actions,
+            "portfolio": portfolio,
+        },
     }
 
 
@@ -309,17 +322,109 @@ def _build_application_worker() -> BackgroundWorkerService:
         }
         MeetingProcessingService(repository, handlers).process(job)
 
+    def process_intelligence_scan(job):
+        """Run one ORGANISATION_INTELLIGENCE_SCAN to durable completion.
+
+        Scope comes SOLELY from the durable job row (job.organisation_id).
+        The scanner reuses the tenant graph's existing intelligence
+        services; unexpected failures propagate so the worker's
+        retry/fail semantics apply (no fabricated success, existing
+        intelligence untouched).
+        """
+        from app.services.proactive_intelligence_service import (
+            ProactiveIntelligenceScanner,
+        )
+
+        organisation_id = getattr(job, "organisation_id", None) or DEFAULT_ORGANISATION_ID
+        scanner = ProactiveIntelligenceScanner(
+            job_repository=repository,
+            build_graph=_build_tenant_graph,
+        )
+        # Rebind the scanner to the durable scope explicitly: even if the
+        # claimed job object were stale, the authoritative scope is the
+        # stored row re-read here.
+        stored = repository.get(job.job_id)
+        scope = (getattr(stored, "organisation_id", None) or organisation_id)
+        job.organisation_id = scope
+        scanner.run_scan(job)
+
     return BackgroundWorkerService(
         repository,
-        {BackgroundJobType.MEETING_PROCESSING: process_meeting},
+        {
+            BackgroundJobType.MEETING_PROCESSING: process_meeting,
+            BackgroundJobType.ORGANISATION_INTELLIGENCE_SCAN: process_intelligence_scan,
+        },
         lease_seconds=settings.background_lease_seconds,
     )
 
 
 def _worker_loop(worker: BackgroundWorkerService) -> None:
     while not _worker_stop.is_set():
+        _maybe_tick_proactive_scheduler()
         worker.run_once()
         _worker_stop.wait(settings.background_poll_interval_seconds)
+
+
+# Last scheduler tick (process-local timing only).  Restart safety never
+# depends on this value: duplicate prevention is durable (time-bucketed job
+# IDs + enqueue ON CONFLICT DO NOTHING + outstanding-job check).  After a
+# restart the first tick may fire immediately — harmless, never duplicative.
+_proactive_last_tick = None
+
+
+def _maybe_tick_proactive_scheduler() -> None:
+    """Enqueue due ORGANISATION_INTELLIGENCE_SCAN jobs (Stage 34, E6).
+
+    Single-node recurring tick driven by the process-local worker loop:
+    wakes at a configurable interval, discovers active organisations,
+    enqueues one scan job per org with no outstanding scan.  Best-effort:
+    a tick failure only logs (durable state untouched, next tick retries)
+    and can never crash the worker thread or fabricate scan results.
+    """
+    global _proactive_last_tick
+    if not settings.proactive_intelligence_enabled:
+        return
+    try:
+        from datetime import datetime, timezone
+
+        from app.api.auth import get_auth_repository
+        from app.services.proactive_intelligence_service import (
+            build_scan_job,
+            plan_proactive_scans,
+            time_bucket,
+        )
+
+        now = datetime.now(timezone.utc)
+        interval = settings.proactive_intelligence_interval_seconds
+        if _proactive_last_tick is not None and (
+            now - _proactive_last_tick
+        ).total_seconds() < interval:
+            return
+        _proactive_last_tick = now
+        repository = get_job_repository()
+        bucket = time_bucket(now, interval)
+        for org_id in plan_proactive_scans(
+            job_repository=repository,
+            auth_repository=get_auth_repository(),
+        ):
+            try:
+                repository.enqueue(
+                    build_scan_job(
+                        org_id,
+                        bucket,
+                        now=now,
+                        max_attempts=settings.background_max_attempts,
+                    )
+                )
+            except Exception:
+                # One org's enqueue failure must not starve the others or
+                # kill the loop; the next tick retries.  Only the org id
+                # is logged — never job payloads or identity material.
+                logger.exception(
+                    "proactive_scheduler_enqueue_failed org=%s", org_id
+                )
+    except Exception:
+        logger.exception("proactive_scheduler_tick_failed")
 
 def start_background_worker() -> None:
     global _application_worker, _worker_thread
@@ -373,6 +478,7 @@ app.include_router(entities_router, prefix=settings.api_v1_prefix)
 app.include_router(attention_router, prefix=settings.api_v1_prefix)
 app.include_router(portfolio_router, prefix=settings.api_v1_prefix)
 app.include_router(changes_router, prefix=settings.api_v1_prefix)
+app.include_router(intelligence_router, prefix=settings.api_v1_prefix)
 app.include_router(query_router, prefix=settings.api_v1_prefix)
 app.include_router(jobs_router, prefix=settings.api_v1_prefix)
 
@@ -404,7 +510,8 @@ def health_diagnostics(request: Request) -> dict:
     authentication is active, ADMIN/OWNER only and scoped to the caller's
     organisation.
     """
-    from fastapi import Depends, HTTPException, status as _status
+    from fastapi import HTTPException
+    from fastapi import status as _status
 
     from app.api.auth import get_request_context
     from app.api.jobs import get_job_repository
@@ -428,7 +535,10 @@ def health_diagnostics(request: Request) -> dict:
             _semantic_repository.count()
         else:
             ctx.repos.semantic.count()
-    except Exception:
+    # Availability probe only: the diagnostics payload must still be served
+    # when the semantic store is unreadable.  Narrowed to repository/shape
+    # failures; anything else propagates.
+    except (KeyError, ValueError, TypeError, AttributeError):
         semantic_available = False
     return {
         "source_backend": settings.source_repository_backend,

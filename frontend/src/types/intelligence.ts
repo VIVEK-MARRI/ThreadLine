@@ -86,3 +86,18 @@ export interface DependencyGraphResponse {
   contains_cycle: boolean;
   cycle_entity_ids: string[];
 }
+
+/* Proactive scan status (Stage 34): latest SUCCEEDED
+ * ORGANISATION_INTELLIGENCE_SCAN for the caller's organisation, or
+ * scanned=false when no usable scan history exists. Every field is
+ * backend-persisted scan state — never invented timestamps.
+ */
+export interface ScanStatusResponse {
+  scanned: boolean;
+  completed_at: string | null;
+  watermark: number | null;
+  signal_count: number | null;
+  new_signal_count: number | null;
+  new_signal_ids: string[];
+  truncated: boolean;
+}

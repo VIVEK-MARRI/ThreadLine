@@ -328,6 +328,19 @@ class ScopedBackgroundJobRepository(AbstractBackgroundJobRepository):
             raise TenantScopeMismatchError(f"job '{job_id}' is outside the current organisation")
         return self._inner.checkpoint(job_id, stage, worker_id=worker_id)
 
+    def record_scan_result(
+        self,
+        job_id: str,
+        result_summary: str,
+        processing_revision: Optional[str] = None,
+        worker_id: Optional[str] = None,
+    ) -> BackgroundJob:
+        if self.get(job_id) is None:
+            raise TenantScopeMismatchError(f"job '{job_id}' is outside the current organisation")
+        return self._inner.record_scan_result(
+            job_id, result_summary, processing_revision, worker_id=worker_id
+        )
+
     def recover_stale(self) -> list[BackgroundJob]:
         return [
             job for job in self._inner.recover_stale()

@@ -44,6 +44,8 @@ export const queryKeys = {
     ["tl", scope(organisationId), "portfolio"] as const,
   changes: (organisationId: string, filters?: Record<string, unknown>) =>
     ["tl", scope(organisationId), "changes", filters ?? null] as const,
+  scanStatus: (organisationId: string) =>
+    ["tl", scope(organisationId), "intelligence", "scan-status"] as const,
   queryEvidence: (organisationId: string, question: string, entityId?: string | null) =>
     ["tl", scope(organisationId), "query", "evidence", question, entityId ?? null] as const,
   jobs: (organisationId: string) => ["tl", scope(organisationId), "jobs"] as const,

@@ -122,11 +122,9 @@ using path_id. The same logical path does not generate duplicate changes.
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
-from app.models.insights import InsightType
 from app.models.attention import AttentionReason
-from app.models.temporal import TemporalState
+from app.models.insights import InsightType
 from app.models.organisation_change import (
     CHANGE_SEVERITY_ORDER,
     CHANGE_TYPE_PRIORITY,
@@ -138,6 +136,7 @@ from app.models.organisation_change import (
     OrganisationChangeType,
     make_change_id,
 )
+from app.models.temporal import TemporalState
 from app.repositories.dependency_repository import AbstractDependencyRepository
 from app.repositories.entity_repository import AbstractEntityRepository
 from app.repositories.meeting_repository import AbstractMeetingRepository
@@ -145,6 +144,7 @@ from app.repositories.mention_repository import AbstractMentionRepository
 from app.services.attention_service import AttentionService
 from app.services.dependency_graph_service import DependencyGraphService
 from app.services.entity_relationship_service import EntityRelationshipService
+from app.services.entity_service import EntityNotFoundError
 from app.services.impact_analysis_service import ImpactAnalysisService
 from app.services.insight_service import DEFAULT_STALE_THRESHOLD_DAYS, InsightService
 from app.services.temporal_state_service import TemporalStateService
@@ -186,7 +186,7 @@ def _sort_changes(changes: list[OrganisationChange]) -> list[OrganisationChange]
 def _build_sort_key(
     severity: OrganisationChangeSeverity,
     change_type: OrganisationChangeType,
-    detected_at: Optional[datetime],
+    detected_at: datetime | None,
     entity_id: str,
     change_id: str,
 ) -> str:
@@ -234,7 +234,7 @@ class OrganisationChangeIntelligenceService:
         meeting_repo: AbstractMeetingRepository,
         interpreter: AbstractStateInterpreter,
         policy: AbstractTemporalStatePolicy,
-        dependency_repo: Optional[AbstractDependencyRepository] = None,
+        dependency_repo: AbstractDependencyRepository | None = None,
         current_revision_lookup=None,
     ) -> None:
         self._entity_repo = entity_repo
@@ -275,7 +275,7 @@ class OrganisationChangeIntelligenceService:
         )
 
         if dependency_repo is not None:
-            self._dependency_graph_service: Optional[DependencyGraphService] = (
+            self._dependency_graph_service: DependencyGraphService | None = (
                 DependencyGraphService(
                     dependency_repo=dependency_repo,
                     entity_repo=entity_repo,
@@ -300,15 +300,15 @@ class OrganisationChangeIntelligenceService:
 
     def get_changes(
         self,
-        current_time: Optional[datetime] = None,
+        current_time: datetime | None = None,
         stale_threshold_days: int = DEFAULT_STALE_THRESHOLD_DAYS,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        change_type: Optional[OrganisationChangeType] = None,
-        severity: Optional[OrganisationChangeSeverity] = None,
-        entity_id: Optional[str] = None,
-        meeting_id: Optional[str] = None,
-        limit: Optional[int] = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        change_type: OrganisationChangeType | None = None,
+        severity: OrganisationChangeSeverity | None = None,
+        entity_id: str | None = None,
+        meeting_id: str | None = None,
+        limit: int | None = None,
     ) -> list[OrganisationChange]:
         """Detect and return all organisation-wide changes.
 
@@ -380,7 +380,16 @@ class OrganisationChangeIntelligenceService:
                     if change.change_id not in seen_change_ids:
                         seen_change_ids.add(change.change_id)
                         all_changes.append(change)
-            except Exception:
+            # Per-entity guard: one bad entity must not abort the whole
+            # organisation scan.  Narrowed to the failures this path can
+            # genuinely produce — unknown entities (EntityNotFoundError),
+            # repository domain errors (KeyError/ValueError, including
+            # InvalidJobTransition and duplicate errors), and malformed
+            # record shapes (TypeError/AttributeError/IndexError).
+            # A total storage outage already raises at list_entities() above,
+            # so a mid-scan storage failure fails loudly here rather than
+            # returning a silently partial change list as complete.
+            except (EntityNotFoundError, KeyError, ValueError, TypeError, AttributeError, IndexError):
                 logger.exception(
                     "OrganisationChangeIntelligenceService: error processing "
                     "entity %s, skipping.",
@@ -432,10 +441,10 @@ class OrganisationChangeIntelligenceService:
 
     def get_summary(
         self,
-        current_time: Optional[datetime] = None,
+        current_time: datetime | None = None,
         stale_threshold_days: int = DEFAULT_STALE_THRESHOLD_DAYS,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
     ) -> OrganisationChangeSummary:
         """Compute a structured aggregate summary of organisation-wide changes.
 
@@ -639,8 +648,8 @@ class OrganisationChangeIntelligenceService:
             change_type: OrganisationChangeType,
             transition_key: str,
             evidence: str,
-            previous_state: Optional[str] = None,
-            current_state_val: Optional[str] = None,
+            previous_state: str | None = None,
+            current_state_val: str | None = None,
         ) -> OrganisationChange:
             """Construct an OrganisationChange from an insight-derived rule."""
             cid = make_change_id(entity_id, change_type, transition_key, meeting_id)
@@ -798,7 +807,12 @@ class OrganisationChangeIntelligenceService:
                 meeting = self._meeting_repo.get_by_id(dep.meeting_id)
                 if meeting is not None:
                     detected_at = meeting.meeting_date
-            except Exception:
+            # Meeting lookup is best-effort: a missing or unreadable meeting
+            # means no trustworthy detected_at, so the change is skipped.
+            # Narrowed to repository/shape failures (get_by_id returns None
+            # when missing by contract; KeyError/ValueError cover row-mapping
+            # domain errors).
+            except (KeyError, ValueError, TypeError, AttributeError):
                 pass
 
             if detected_at is None:
@@ -870,7 +884,10 @@ class OrganisationChangeIntelligenceService:
 
         try:
             graph = self._dependency_graph_service.build_dependency_graph(entity_id)
-        except Exception:
+        # Graph build fails safe: unknown entity (EntityNotFoundError),
+        # repository domain errors, or malformed graph shapes.  Anything else
+        # (e.g. storage outage) propagates instead of silently dropping the rule.
+        except (EntityNotFoundError, KeyError, ValueError, TypeError, AttributeError):
             logger.debug(
                 "OrganisationChangeIntelligenceService: dependency graph failed "
                 "for entity %s, skipping.",
@@ -946,7 +963,10 @@ class OrganisationChangeIntelligenceService:
                 entity_id=entity_id,
                 current_time=current_time,
             )
-        except Exception:
+        # Impact lookup fails safe under the same rule as the graph build:
+        # unknown entity, repository domain errors, or malformed shapes skip
+        # the rule; anything else propagates.
+        except (EntityNotFoundError, KeyError, ValueError, TypeError, AttributeError):
             logger.debug(
                 "OrganisationChangeIntelligenceService: impact analysis failed "
                 "for entity %s, skipping.",
@@ -993,7 +1013,7 @@ class OrganisationChangeIntelligenceService:
         ))
 
     @staticmethod
-    def _parse_state_transition(description: str) -> tuple[Optional[str], Optional[str]]:
+    def _parse_state_transition(description: str) -> tuple[str | None, str | None]:
         """Extract (from_state, to_state) from an InsightService description.
 
         InsightService generates descriptions like:
@@ -1013,6 +1033,9 @@ class OrganisationChangeIntelligenceService:
                     valid_states = {s.value for s in TemporalState}
                     if from_state in valid_states and to_state in valid_states:
                         return from_state, to_state
-        except Exception:
+        # Pure string parsing: only shape failures are possible (None or
+        # non-string descriptions raise TypeError/AttributeError; the split
+        # indexing is length-guarded but IndexError is kept for safety).
+        except (TypeError, AttributeError, IndexError):
             pass
         return None, None

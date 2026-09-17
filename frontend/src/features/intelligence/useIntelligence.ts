@@ -18,6 +18,7 @@ import type {
   ChangesResponse,
   PortfolioEntitySummary,
   PortfolioResponse,
+  ScanStatusResponse,
 } from "../../types/intelligence";
 import type { IntelligenceChangeFilters } from "./intelligenceFormat";
 import {
@@ -88,6 +89,16 @@ export function useIntelligenceRepeatedSignals() {
   return useQuery<ChangesResponse>({
     queryKey: queryKeys.changes(organisationId ?? "", filters),
     queryFn: () => intelligenceApi.changes(filters),
+    enabled: Boolean(organisationId),
+    staleTime: 30_000,
+  });
+}
+
+export function useIntelligenceScanStatus() {
+  const { organisationId } = useOrganisation();
+  return useQuery<ScanStatusResponse>({
+    queryKey: queryKeys.scanStatus(organisationId ?? ""),
+    queryFn: () => intelligenceApi.scanStatus(),
     enabled: Boolean(organisationId),
     staleTime: 30_000,
   });

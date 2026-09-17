@@ -42,6 +42,10 @@ Copy `.env.example` to `.env` and set:
 | `EXTRACTION_PROVIDER` | No | `openai` | `openai` or `fake` |
 | `NL_PROVIDER` | No | `fake` | `fake` or `openai` (for Ask answers) |
 | `AUTH_OPEN_BOOTSTRAP` | No | `true` | Set to `false` after first owner is created |
+| `PROACTIVE_INTELLIGENCE_ENABLED` | No | `false` | Recurring org scans (Stage 34); enable explicitly |
+| `PROACTIVE_INTELLIGENCE_INTERVAL_SECONDS` | No | `3600.0` | Seconds between scan ticks; must be > 0 |
+| `QUERY_RATE_LIMIT_REQUESTS` | No | `60` | Per-user query quota per window (Stage 34) |
+| `QUERY_RATE_LIMIT_WINDOW_SECONDS` | No | `60.0` | Rate-limit window; must be > 0 |
 
 No JWT signing secret is required — sessions are opaque server-side tokens (only hashes stored).
 
@@ -78,7 +82,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 The backend:
 - Creates `.threadline/threadline.db` on first start
-- Runs idempotent schema migrations (versions 1–5)
+- Runs idempotent schema migrations (versions 1–6)
 - Starts the background worker when `BACKGROUND_WORKER_ENABLED=true`
 - Exposes `/health` for liveness checks
 
@@ -137,6 +141,15 @@ curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
 
 Then set `AUTH_OPEN_BOOTSTRAP=false` in `.env` and restart.
 
+**Bootstrap lifecycle guarantee (enforced at runtime, not by convention):**
+bootstrap is open only while the flag is on *and* zero users exist. The
+moment the first owner is created, `/api/v1/auth/bootstrap` returns 403
+and anonymous data access returns 401 — even if the flag is still `true`
+(e.g. the process is never restarted). An unreadable identity store fails
+closed. There are no default credentials. Setting the flag to `false`
+after bootstrapping is still required: it removes the open-bootstrap code
+path entirely instead of relying on the user-count check.
+
 ## 6. Health Checks
 
 ```
@@ -179,3 +192,45 @@ Schema migrations are forward-only. To rollback a migration, restore from a pre-
 | `database is locked` | Multiple processes | Ensure only one uvicorn process writes to the DB |
 | Frontend shows blank | Missing production build | Run `cd frontend && npm run build` |
 | No NL answers | NL provider is `fake` | Set `NL_PROVIDER=openai` and `OPENAI_API_KEY` |
+| 429 on Ask/query | Query quota consumed | Wait for the window (`Retry-After`) or raise `QUERY_RATE_LIMIT_*` |
+| No proactive scans | Scheduler disabled (default) | Set `PROACTIVE_INTELLIGENCE_ENABLED=true`, restart |
+
+## 11. Proactive Intelligence (Stage 34)
+
+Disabled by default. When `PROACTIVE_INTELLIGENCE_ENABLED=true` (and the
+background worker is enabled), the process-local worker tick enqueues one
+`ORGANISATION_INTELLIGENCE_SCAN` job per active organisation every
+`PROACTIVE_INTELLIGENCE_INTERVAL_SECONDS` (must be > 0; 1800–7200
+recommended). Each scan reuses the existing deterministic intelligence
+services, records a SUCCEEDED job row carrying the observed source
+watermark plus deterministic signal IDs, and reports only genuinely new
+signals — a scan never alerts merely because it ran. Latest scan state is
+visible at `GET /api/v1/intelligence/scan-status` and on the Intelligence
+page ("Proactive scan" panel). This is single-node scheduling: no
+distributed coordination is claimed.
+
+## 12. Query Rate Limiting and Fallback (Stage 34)
+
+`POST /api/v1/query` and `POST /api/v1/query/evidence` share one
+per-authenticated-user sliding window (`QUERY_RATE_LIMIT_REQUESTS` per
+`QUERY_RATE_LIMIT_WINDOW_SECONDS`; anonymous bootstrap callers fall back
+to client IP). Over-quota requests receive HTTP 429 with a machine-readable
+`{"error": "rate_limited", ...}` body and a `Retry-After` header. Login's
+per-email throttle is a separate, unchanged mechanism. Limitation: each
+process enforces its own window — this is overload protection for the
+single-node deployment, not a distributed global guarantee.
+
+Unmatched questions no longer always reject immediately: an UNKNOWN intent
+consults a conservative fallback that probes bounded, revision-guarded,
+organisation-scoped semantic evidence. Only overlapping, citable evidence
+(≥2 shared whole-word tokens, attributed to an entity or meeting) reaches
+the standard evidence→answer pipeline; anything else keeps the historical
+safe rejection. No guessed answers are ever generated.
+
+## 13. Live OpenAI Integration Tests (Stage 34)
+
+The default suite is network-free. Real provider calls run only with
+`RUN_LIVE_OPENAI_TESTS=true` **and** a configured `OPENAI_API_KEY`, and
+assert structure only (never model output text). No live-provider CI job
+exists (no repository secrets are configured); do not claim live coverage
+from ordinary CI.

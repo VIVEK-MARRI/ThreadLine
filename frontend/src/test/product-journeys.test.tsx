@@ -148,6 +148,9 @@ function journeyStub() {
     if (pathname === "/api/v1/attention") return jsonResponse(200, ATTENTION);
     if (pathname === "/api/v1/portfolio") return jsonResponse(200, PORTFOLIO);
     if (pathname === "/api/v1/changes") return jsonResponse(200, CHANGES);
+    if (pathname === "/api/v1/intelligence/scan-status") {
+      return jsonResponse(200, { scanned: false });
+    }
     if (pathname === "/api/v1/meetings") {
       return jsonResponse(200, {
         meetings: [meetingSummary()],

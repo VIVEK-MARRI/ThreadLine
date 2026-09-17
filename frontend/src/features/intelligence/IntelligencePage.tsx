@@ -10,6 +10,7 @@ import type {
   ChangesResponse,
   PortfolioEntitySummary,
   PortfolioResponse,
+  ScanStatusResponse,
 } from "../../types/intelligence";
 import type { MeetingSummary } from "../../types/meetings";
 import {
@@ -20,6 +21,7 @@ import {
   ImpactMovementSection,
   RecentMovementSection,
   RepeatedSignalsSection,
+  ScanStatusSection,
   type SectionQuery,
 } from "./IntelligenceSections";
 import {
@@ -37,6 +39,7 @@ import {
   useIntelligenceMovement,
   useIntelligencePortfolio,
   useIntelligenceRepeatedSignals,
+  useIntelligenceScanStatus,
 } from "./useIntelligence";
 import "./intelligence.css";
 
@@ -66,6 +69,7 @@ export function IntelligencePage(): React.JSX.Element {
   const stream: SectionQuery<ChangesResponse> = useIntelligenceChangeStream(filters);
   const repeated: SectionQuery<ChangesResponse> = useIntelligenceRepeatedSignals();
   const movement: SectionQuery<ChangesResponse> = useIntelligenceMovement();
+  const scanStatus: SectionQuery<ScanStatusResponse> = useIntelligenceScanStatus();
   const meetingsQuery = useIntelligenceMeetingDirectory();
   const meetingDirectory: Map<string, MeetingSummary> = meetingsQuery.directory;
 
@@ -143,6 +147,7 @@ export function IntelligencePage(): React.JSX.Element {
           <RecentMovementSection query={movement} entities={entities} meetings={meetingDirectory} />
         </div>
         <div className="tl-intel-side">
+          <ScanStatusSection query={scanStatus} />
           <FollowUpPathsSection query={portfolio} />
           {hasActiveStreamFilters(filters) ? (
             <p className="tl-intel-section-note" role="status">

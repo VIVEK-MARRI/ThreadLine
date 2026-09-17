@@ -5,13 +5,11 @@ Exposes the evidence-backed natural language intelligence layer.
 
 import logging
 from datetime import datetime, timezone
-import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.auth import Authorisation, get_request_context, require_permission
-from app.auth.models import Permission
-from app.core.config import settings
+from app.api.changes import get_organisation_change_intelligence_service
 from app.api.entities import (
     _entity_repository,
     get_action_recommendation_service,
@@ -25,13 +23,20 @@ from app.api.entities import (
     get_unified_timeline_service,
 )
 from app.api.meetings import _meeting_repository
-from app.api.changes import get_organisation_change_intelligence_service
-
+from app.auth.models import Permission
+from app.core.config import settings
 from app.models.natural_language import NaturalLanguageQuery, make_query_id
 from app.providers.base import (
     NLProviderError,
     NLProviderNotConfiguredError,
     NLProviderResponseError,
+)
+from app.providers.fake_embedding_provider import FakeEmbeddingProvider
+from app.providers.openai_embedding_provider import OpenAIEmbeddingProvider
+from app.repositories.semantic_index_repository import (
+    AbstractSemanticIndexRepository,
+    InMemorySemanticIndexRepository,
+    JsonFileSemanticIndexRepository,
 )
 from app.schemas.query import (
     NaturalLanguageEvidenceResponse,
@@ -40,18 +45,16 @@ from app.schemas.query import (
 )
 from app.services.evidence_context_builder import EvidenceContextBuilder
 from app.services.evidence_retrieval_service import EvidenceRetrievalService
+from app.services.hybrid_evidence_retrieval_service import (
+    HybridEvidenceRetrievalService,
+)
 from app.services.natural_language_query_service import NaturalLanguageQueryService
 from app.services.query_entity_resolver import QueryEntityResolver
 from app.services.query_intent_service import QueryIntentService
-from app.providers.fake_embedding_provider import FakeEmbeddingProvider
-from app.providers.openai_embedding_provider import OpenAIEmbeddingProvider
-from app.repositories.semantic_index_repository import (
-    AbstractSemanticIndexRepository,
-    InMemorySemanticIndexRepository,
-    JsonFileSemanticIndexRepository,
+from app.services.rate_limit import SlidingWindowRateLimiter
+from app.services.semantic_evidence_retrieval_service import (
+    SemanticEvidenceRetrievalService,
 )
-from app.services.hybrid_evidence_retrieval_service import HybridEvidenceRetrievalService
-from app.services.semantic_evidence_retrieval_service import SemanticEvidenceRetrievalService
 from app.services.semantic_indexing_service import SemanticIndexingService
 
 logger = logging.getLogger(__name__)
@@ -189,6 +192,16 @@ def get_natural_language_query_service(
         current_revision_lookup=_current_revision,
         organisation_id=ctx.organisation_id,
     )
+    # Stage 34 routing fallback: UNKNOWN questions probe the same bounded,
+    # revision-guarded semantic path for overlapping citable evidence.
+    from app.services.query_fallback import LexicalSufficiencyFallback
+
+    fallback = LexicalSufficiencyFallback(
+        semantic_service=semantic_service,
+        corpus_provider=lambda current_time: retrieval_svc.build_semantic_corpus(current_time),
+        current_revision_lookup=_current_revision,
+        organisation_id=ctx.organisation_id,
+    )
     return NaturalLanguageQueryService(
         intent_svc=_intent_service,
         entity_resolver=QueryEntityResolver(entity_repo=ctx.repos.entities),
@@ -196,6 +209,69 @@ def get_natural_language_query_service(
         context_builder=_context_builder,
         provider=_nl_provider,
         hybrid_retrieval_svc=hybrid_service,
+        fallback_strategy=fallback,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Expensive-endpoint rate limiting (Stage 34, Part F)
+# ---------------------------------------------------------------------------
+# POST /query (LLM + full retrieval) and POST /query/evidence (full
+# retrieval) share one per-principal sliding window.  Keyed by stable
+# authenticated user id; anonymous bootstrap callers fall back to client IP
+# (bounded second dimension, same window).  Login's per-email throttle is
+# untouched (separate mechanism in app.auth.service).
+#
+# The limiter is rebuilt when the configured limits change so tests can
+# monkeypatch settings into isolation without cross-test leakage.
+
+_query_limiter: SlidingWindowRateLimiter | None = None
+_query_limiter_params: tuple | None = None
+
+
+def _get_query_limiter() -> SlidingWindowRateLimiter:
+    global _query_limiter, _query_limiter_params
+    params = (
+        settings.query_rate_limit_requests,
+        settings.query_rate_limit_window_seconds,
+    )
+    if _query_limiter is None or _query_limiter_params != params:
+        _query_limiter = SlidingWindowRateLimiter(
+            max_requests=settings.query_rate_limit_requests,
+            window_seconds=settings.query_rate_limit_window_seconds,
+        )
+        _query_limiter_params = params
+    return _query_limiter
+
+
+def _rate_limit_key(ctx: Authorisation, request: Request) -> str:
+    if ctx.user is not None:
+        return f"user:{ctx.user.user_id}"
+    client = request.client.host if request.client is not None else "unknown"
+    return f"ip:{client}"
+
+
+def require_query_rate_limit(
+    request: Request,
+    ctx: Authorisation = Depends(get_request_context),
+) -> None:
+    """Deny over-quota expensive queries with 429 + Retry-After.
+
+    Safe error shape only (no limiter internals, no identity material).
+    """
+    import math
+
+    allowed, retry_after = _get_query_limiter().check(_rate_limit_key(ctx, request))
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "error": "rate_limited",
+            "message": "Too many requests. Please slow down and try again.",
+            "retry_after_seconds": math.ceil(retry_after),
+        },
+        headers={"Retry-After": str(math.ceil(retry_after))},
     )
 
 
@@ -218,6 +294,7 @@ def submit_query(
     request: NaturalLanguageQueryRequest,
     service: NaturalLanguageQueryService = Depends(get_natural_language_query_service),
     _ctx: Authorisation = Depends(require_permission(Permission.QUERY_RUN)),
+    _limited: None = Depends(require_query_rate_limit),
 ) -> NaturalLanguageQueryResponse:
     """Process a natural language query end-to-end."""
     now = datetime.now(timezone.utc)
@@ -291,6 +368,7 @@ def get_query_evidence(
     request: NaturalLanguageQueryRequest,
     service: NaturalLanguageQueryService = Depends(get_natural_language_query_service),
     _ctx: Authorisation = Depends(require_permission(Permission.QUERY_RUN)),
+    _limited: None = Depends(require_query_rate_limit),
 ) -> NaturalLanguageEvidenceResponse:
     """Retrieve evidence without generating an answer."""
     now = datetime.now(timezone.utc)

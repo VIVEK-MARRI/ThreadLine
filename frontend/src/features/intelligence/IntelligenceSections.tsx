@@ -27,6 +27,7 @@ import type {
   OrganisationChange,
   PortfolioEntitySummary,
   PortfolioResponse,
+  ScanStatusResponse,
 } from "../../types/intelligence";
 import type { MeetingSummary } from "../../types/meetings";
 import {
@@ -577,6 +578,63 @@ export function FollowUpPathsSection({
             </li>
           ))}
         </ul>
+      ) : null}
+    </Section>
+  );
+}
+
+/* Proactive scan status (Stage 34, E10): the latest durable scan only.
+ * Distinguishes "observed previously" (signal_count), "newly detected"
+ * (new_signal_ids from the backend diff), and "not scanned yet". Every
+ * timestamp and count comes from the backend scan row — nothing invented.
+ */
+export function ScanStatusSection({
+  query,
+}: {
+  query: SectionQuery<ScanStatusResponse>;
+}): React.JSX.Element {
+  const status = query.data;
+  return (
+    <Section
+      title="Proactive scan"
+      description="The latest durable organisation scan. New signals are identifiers the backend saw for the first time in that scan."
+    >
+      {query.isLoading ? <SectionSkeleton lines={3} label="Loading scan status" /> : null}
+      {!query.isLoading && query.isError ? (
+        <ErrorState
+          title="Couldn't load scan status"
+          error={query.error}
+          onRetry={() => void query.refetch()}
+        />
+      ) : null}
+      {!query.isLoading && !query.isError && (!status || !status.scanned) ? (
+        <EmptyState
+          title="No proactive scan yet"
+          body="The backend has not completed a proactive intelligence scan for this organisation. Existing attention, changes, and portfolio sections are unaffected."
+        />
+      ) : null}
+      {!query.isLoading && !query.isError && status?.scanned ? (
+        <div>
+          <p className="tl-intel-row-detail">
+            {`Last scan ${status.completed_at ? (relativeTime(status.completed_at) ?? formatDateTime(status.completed_at)) : "at an unknown time"} — ${status.signal_count ?? 0} signals observed, ${status.new_signal_count ?? 0} newly detected.`}
+          </p>
+          {(status.new_signal_ids ?? []).length > 0 ? (
+            <ul className="tl-intel-rows">
+              {status.new_signal_ids.slice(0, 10).map((signalId) => (
+                <li key={signalId}>
+                  <div className="tl-intel-row-head">
+                    <StatusBadge tone="info" label="NEW" />
+                    <span className="tl-intel-row-title">{signalId}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="tl-intel-row-detail">
+              No new signals since the previous scan — earlier findings are unchanged.
+            </p>
+          )}
+        </div>
       ) : null}
     </Section>
   );

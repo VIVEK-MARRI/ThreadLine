@@ -15,23 +15,23 @@ Pipeline flow:
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from app.models.natural_language import (
     EntityResolutionStatus,
-    MAX_EVIDENCE_ITEMS,
+    EvidenceItem,
     NaturalLanguageAnswer,
     NaturalLanguageQuery,
     QueryIntent,
-    make_query_id,
-    EvidenceItem,
 )
 from app.providers.base import AbstractNaturalLanguageAnswerProvider
 from app.services.evidence_context_builder import EvidenceContextBuilder
 from app.services.evidence_retrieval_service import EvidenceRetrievalService
+from app.services.hybrid_evidence_retrieval_service import (
+    HybridEvidenceRetrievalService,
+)
 from app.services.query_entity_resolver import QueryEntityResolver
+from app.services.query_fallback import AbstractQueryFallbackStrategy
 from app.services.query_intent_service import QueryIntentService
-from app.services.hybrid_evidence_retrieval_service import HybridEvidenceRetrievalService
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,8 @@ class NaturalLanguageQueryService:
         retrieval_svc: EvidenceRetrievalService,
         context_builder: EvidenceContextBuilder,
         provider: AbstractNaturalLanguageAnswerProvider,
-        hybrid_retrieval_svc: Optional[HybridEvidenceRetrievalService] = None,
+        hybrid_retrieval_svc: HybridEvidenceRetrievalService | None = None,
+        fallback_strategy: AbstractQueryFallbackStrategy | None = None,
     ) -> None:
         self._intent_svc = intent_svc
         self._entity_resolver = entity_resolver
@@ -54,8 +55,11 @@ class NaturalLanguageQueryService:
         self._context_builder = context_builder
         self._provider = provider
         self._hybrid_retrieval = hybrid_retrieval_svc
+        # Stage 34 routing boundary: UNKNOWN intents consult this probe.
+        # None preserves the historical immediate rejection exactly.
+        self._fallback = fallback_strategy
 
-    def _get_time(self, provided: Optional[datetime]) -> datetime:
+    def _get_time(self, provided: datetime | None) -> datetime:
         return provided if provided else datetime.now(timezone.utc)
 
     def query(self, request: NaturalLanguageQuery) -> NaturalLanguageAnswer:
@@ -76,17 +80,33 @@ class NaturalLanguageQueryService:
         intent = self._intent_svc.classify(request.question)
         logger.info("QueryService: classified intent=%s", intent.value)
 
-        # Fast path for UNKNOWN
+        # Fast path for UNKNOWN: consult the fallback strategy boundary.
+        # No strategy (or an empty probe) preserves the historical safe
+        # rejection verbatim.  A non-empty probe falls through to the
+        # standard evidence→answer pipeline below with intent UNKNOWN —
+        # never a guessed answer, always cited bounded evidence.
+        probed_items = None
         if intent == QueryIntent.UNKNOWN:
-            return NaturalLanguageAnswer(
-                query_id=request.query_id,
-                question=request.question,
-                intent=intent,
-                entity_id=request.entity_id,
-                answer="ThreadLine could not understand the intent of this question.",
-                insufficient_evidence=True,
-                generated_at=datetime.now(timezone.utc),
-            )
+            if self._fallback is not None:
+                probed_items = self._fallback.probe(
+                    request.question, current_time, request.max_evidence_items
+                )
+                if probed_items:
+                    warnings.append(
+                        "Question intent was unclear; answering from the "
+                        "evidence that lexically overlaps the question."
+                    )
+            if not probed_items:
+                return NaturalLanguageAnswer(
+                    query_id=request.query_id,
+                    question=request.question,
+                    intent=intent,
+                    entity_id=request.entity_id,
+                    answer="ThreadLine could not understand the intent of this question.",
+                    insufficient_evidence=True,
+                    warnings=warnings,
+                    generated_at=datetime.now(timezone.utc),
+                )
 
         # 2. Entity Resolution
         # Determine if intent requires an entity
@@ -141,8 +161,11 @@ class NaturalLanguageQueryService:
                 
             resolved_entity_id = res.entity_id
 
-        # 3. Evidence Retrieval
-        if self._hybrid_retrieval is not None:
+        # 3. Evidence Retrieval (UNKNOWN fallback items bypass retrieval:
+        # they already passed the sufficiency probe)
+        if probed_items is not None:
+            raw_items = probed_items
+        elif self._hybrid_retrieval is not None:
             raw_items = self._hybrid_retrieval.retrieve_evidence(
                 intent=intent,
                 entity_id=resolved_entity_id,

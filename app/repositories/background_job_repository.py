@@ -96,6 +96,24 @@ class AbstractBackgroundJobRepository(ABC):
         ...
 
     @abstractmethod
+    def record_scan_result(
+        self,
+        job_id: str,
+        result_summary: str,
+        processing_revision: Optional[str] = None,
+        worker_id: Optional[str] = None,
+    ) -> BackgroundJob:
+        """Persist a scan handler's durable result on a RUNNING job.
+
+        Stage 34: ORGANISATION_INTELLIGENCE_SCAN handlers call this before
+        returning success so the JSON summary (observed source watermark,
+        deterministic signal IDs, new-signal IDs) survives in the job row.
+        Ownership is enforced exactly like checkpoint when worker_id is
+        given; processing_revision carries the observed source watermark.
+        """
+        ...
+
+    @abstractmethod
     def recover_stale(self) -> list[BackgroundJob]:
         ...
 
@@ -194,6 +212,28 @@ class InMemoryBackgroundJobRepository(AbstractBackgroundJobRepository):
             job.stage = stage
             return job
 
+    def record_scan_result(
+        self,
+        job_id: str,
+        result_summary: str,
+        processing_revision: Optional[str] = None,
+        worker_id: Optional[str] = None,
+    ) -> BackgroundJob:
+        now = self._clock()
+        with self._lock:
+            job = self._jobs[job_id]
+            if worker_id is not None and (
+                job.status != BackgroundJobStatus.RUNNING
+                or job.worker_id != worker_id
+                or job.lease_until is None
+                or job.lease_until <= now
+            ):
+                raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
+            job.result_summary = result_summary
+            if processing_revision is not None:
+                job.processing_revision = processing_revision
+            return job
+
     def recover_stale(self) -> list[BackgroundJob]:
         now = self._clock()
         recovered = []
@@ -239,6 +279,11 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             organisation_id = row["organisation_id"]
         except Exception:
             organisation_id = None
+        try:
+            result_summary = row["result_summary"]
+        except Exception:
+            # Pre-Stage-34 rows (schema v5): no summary column yet.
+            result_summary = None
         return BackgroundJob(
             job_id=row["job_id"], job_type=row["job_type"], payload_id=row["payload_id"],
             status=row["status"], attempts=row["attempts"], max_attempts=row["max_attempts"],
@@ -247,6 +292,7 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             error_type=row["error_type"], next_retry_at=_parse(row["next_retry_at"]),
             lease_until=_parse(row["lease_until"]), worker_id=row["worker_id"], stage=row["stage"],
             processing_revision=row["processing_revision"],
+            result_summary=result_summary,
             organisation_id=organisation_id or "default",
         )
 
@@ -255,12 +301,12 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
             connection.execute(
                 """INSERT INTO background_jobs
                 (job_id, job_type, payload_id, status, attempts, max_attempts, created_at,
-                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision, organisation_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, completed_at, last_error, error_type, next_retry_at, lease_until, worker_id, stage, processing_revision, result_summary, organisation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO NOTHING""",
                 (job.job_id, job.job_type.value, job.payload_id, job.status.value, job.attempts,
                  job.max_attempts, _iso(job.created_at), _iso(job.started_at), _iso(job.completed_at),
-                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage, job.processing_revision, job.organisation_id),
+                 job.last_error, job.error_type, _iso(job.next_retry_at), _iso(job.lease_until), job.worker_id, job.stage, job.processing_revision, job.result_summary, job.organisation_id),
             )
             row = connection.execute("SELECT * FROM background_jobs WHERE job_id = ?", (job.job_id,)).fetchone()
             return self._from_row(row)
@@ -338,6 +384,36 @@ class SQLiteBackgroundJobRepository(AbstractBackgroundJobRepository):
                 """UPDATE background_jobs SET stage=? WHERE job_id=?
                    AND (? IS NULL OR (status=? AND worker_id=? AND lease_until IS NOT NULL AND lease_until>?))""",
                 (stage, job_id, worker_id, BackgroundJobStatus.RUNNING.value, worker_id, _iso(now)),
+            )
+            if updated.rowcount != 1:
+                raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
+        return self.get(job_id)
+
+    def record_scan_result(
+        self,
+        job_id: str,
+        result_summary: str,
+        processing_revision: Optional[str] = None,
+        worker_id: Optional[str] = None,
+    ) -> BackgroundJob:
+        now = self._clock()
+        with self._store.transaction() as connection:
+            row = connection.execute("SELECT * FROM background_jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if worker_id is not None and (
+                row["status"] != BackgroundJobStatus.RUNNING.value
+                or row["worker_id"] != worker_id
+                or row["lease_until"] is None
+                or _parse(row["lease_until"]) is None
+                or _parse(row["lease_until"]) <= now
+            ):
+                raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")
+            revision = processing_revision if processing_revision is not None else row["processing_revision"]
+            updated = connection.execute(
+                """UPDATE background_jobs SET result_summary=?, processing_revision=? WHERE job_id=?
+                   AND (? IS NULL OR (status=? AND worker_id=? AND lease_until IS NOT NULL AND lease_until>?))""",
+                (result_summary, revision, job_id, worker_id, BackgroundJobStatus.RUNNING.value, worker_id, _iso(now)),
             )
             if updated.rowcount != 1:
                 raise StaleJobOwnershipError(f"worker {worker_id} no longer owns job {job_id}")

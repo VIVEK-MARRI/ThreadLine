@@ -6,6 +6,7 @@ import type {
   ChangesResponse,
   DependencyGraphResponse,
   PortfolioResponse,
+  ScanStatusResponse,
 } from "../types/intelligence";
 import type { QueryEvidenceResponse, QueryRequest, QueryResponse } from "../types/query";
 import type { Diagnostics, JobHealth } from "../types/jobs";
@@ -34,6 +35,10 @@ export const intelligenceApi = {
       `/api/v1/entities/${encodeURIComponent(entityId)}/dependency-graph`,
       { query: { max_depth: maxDepth } },
     );
+  },
+
+  scanStatus(): Promise<ScanStatusResponse> {
+    return request<ScanStatusResponse>("/api/v1/intelligence/scan-status");
   },
 };
 
