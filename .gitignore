@@ -41,3 +41,7 @@ htmlcov/
 # OS artefacts
 .DS_Store
 Thumbs.db
+
+# Agent tooling caches (skill libraries, not project source)
+.agent/
+.agents/
