@@ -1,0 +1,62 @@
+# ThreadLine on Render — FREE tier blueprint (two free services, $0).
+#
+# Architecture (matches DEPLOYMENT.md single-node model):
+#   threadline-web (static, free)  serves frontend/dist, rewrites /api/* and
+#                                  /health to the API service, SPA fallback
+#   threadline-api (python, free)  uvicorn + SQLite (EPHEMERAL — see below)
+#
+# FREE-TIER REALITY — read before using:
+# - The API service sleeps after ~15 min idle; first request takes ~50 s to wake.
+# - The filesystem is EPHEMERAL: every restart/redeploy wipes the database.
+#   Users, meetings, and memory vanish; you simply bootstrap again. This is a
+#   DEMO setup, not production. Anyone with the URL can bootstrap while the
+#   store is empty, so do not put sensitive data here.
+# - UPGRADE PATH: move threadline-api to Starter ($7/mo) and add a disk:
+#       disk:
+#         name: threadline-data
+#         mountPath: /opt/render/project/src/.threadline
+#         sizeGB: 1
+#   then bootstrap once, set AUTH_OPEN_BOOTSTRAP=false, and redeploy.
+
+services:
+  - type: web
+    name: threadline-api
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.2
+      - key: SOURCE_REPOSITORY_BACKEND
+        value: database
+      - key: SOURCE_DATABASE_PATH
+        value: .threadline/threadline.db
+      - key: BACKGROUND_WORKER_ENABLED
+        value: true
+      - key: AUTH_OPEN_BOOTSTRAP
+        value: true # TEMPORARY — set to false after bootstrapping the owner
+      - key: EXTRACTION_PROVIDER
+        value: fake
+      - key: NL_PROVIDER
+        value: fake
+      # - key: OPENAI_API_KEY
+      #   sync: false # set in dashboard when using real extraction
+
+  - type: web
+    name: threadline-web
+    runtime: static
+    buildCommand: "cd frontend && npm ci && npm run build"
+    staticPublishPath: ./frontend/dist
+    routes:
+      - type: rewrite
+        source: /api/*
+        # Replace with your API service URL after first deploy:
+        destination: https://threadline-api.onrender.com/api/*
+      - type: rewrite
+        source: /health
+        destination: https://threadline-api.onrender.com/health
+      - type: rewrite
+        source: /*
+        destination: /index.html
