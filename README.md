@@ -1,14 +1,32 @@
 # ThreadLine
 
-ThreadLine turns meetings and ongoing work into connected organisational memory — linking entities, history, changes, intelligence, evidence rapid, and follow-up into one view you can ask questions of.
+[![CI](https://github.com/VIVEK-MARRI/ThreadLine/actions/workflows/ci.yml/badge.svg)](https://github.com/VIVEK-MARRI/ThreadLine/actions/workflows/ci.yml)
+[![Last commit](https://img.shields.io/github/last-commit/VIVEK-MARRI/ThreadLine.svg)](https://github.com/VIVEK-MARRI/ThreadLine/commits/main)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-It answers the question that meeting notes never do: **"What is the state of this organisation, how did it get here, and what should we do next?"**
+[![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](app/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-2.x-009688.svg)](app/main.py)
+[![Pydantic](https://img.shields.io/badge/Pydantic-2.x-e92063.svg)](app/schemas/)
+[![SQLite](https://img.shields.io/badge/SQLite-durable-lightgrey.svg)](app/persistence/)
+[![React](https://img.shields.io/badge/React-19-61dafb.svg)](frontend/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6.svg)](frontend/)
+[![Vite](https://img.shields.io/badge/Vite-8-646cff.svg)](frontend/)
+[![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933.svg)](frontend/)
 
-It does this without pretending to know more than it has been shown. Every fact is extracted deterministically from evidence, every entity is resolved against candidates, every change is derived from verified state transitions, every insight points back to the meetings that support it, and every natural-language answer is grounded in citable evidence. ThreadLine prefers to abstain over speculate — an answer it cannot trace to evidence, it refuses to invent.
+ThreadLine turns meetings and ongoing work into connected organisational memory —
+so you can understand what changed, trace it back to evidence, and know where
+follow-up exists.
 
-## Follow the Thread
+It answers the question meeting notes never do: **what is the state of this
+organisation, how did it get here, and what should we do next?** Every fact is
+extracted deterministically from evidence, every change is derived from verified
+state transitions, and every answer points back to the meetings that support it.
+When evidence is insufficient, ThreadLine abstains instead of guessing.
 
-The name comes from the central idea: every observation is a point on a thread that runs from a meeting, through an entity, into memory, and back out as change, intelligence, evidence and action.
+## Follow the thread
+
+Every observation is a point on a thread running from a meeting, through an
+entity, into memory, and back out as change, intelligence, evidence, and action.
 
 ```mermaid
 flowchart LR
@@ -21,25 +39,114 @@ flowchart LR
     Ev --> A[Action]
 ```
 
+## Architecture
+
+ThreadLine is a **modular monolith**: a React frontend, a FastAPI application
+layer, tenant-scoped repositories over durable SQLite, and a process-local
+durable worker. No message broker, no external queue, no distributed fleet.
+
+```mermaid
+flowchart TB
+    subgraph Client["Client"]
+        U[User]
+    end
+
+    subgraph Frontend["Frontend — React 19 + TypeScript"]
+        UI[Routes and feature modules]
+        RQ[TanStack Query]
+    end
+
+    subgraph API["Backend — FastAPI"]
+        RT[API routes /api/v1]
+        AUTH[Auth and organisation scope]
+        SVC[Domain and intelligence services]
+    end
+
+    subgraph Data["Persistence — SQLite"]
+        REPO[Tenant-scoped repositories]
+        DB[(Source state)]
+        SEM[(Semantic index — derived)]
+        JOBS[(Background jobs — durable)]
+    end
+
+    subgraph Worker["Process-local worker"]
+        W[Job executor]
+    end
+
+    U --> UI
+    UI --> RQ
+    RQ --> RT
+    RT --> AUTH
+    AUTH --> SVC
+    SVC --> REPO
+    REPO --> DB
+    SVC --> SEM
+    JOBS --> W
+    W --> SVC
+```
+
+A request travels from UI to source state through one scoped path:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant React as React UI
+    participant API as FastAPI
+    participant Svc as Domain service
+    participant Repo as Repository (org-scoped)
+    participant DB as SQLite
+
+    User->>React: Interact
+    React->>API: GET /api/v1/... + session + X-Organisation-ID
+    API->>API: Authenticate, resolve membership
+    API->>Svc: Call with organisation scope
+    Svc->>Repo: Scoped read/write
+    Repo->>DB: SQL
+    DB-->>Repo: Rows
+    Repo-->>Svc: Domain models
+    Svc-->>API: Response schemas
+    API-->>React: JSON
+```
+
+Intelligence is a deterministic, read-only derivation over durable state —
+never a mutation, never an invention:
+
+```mermaid
+flowchart LR
+    MT[Meeting transcript] --> EX[Extraction]
+    EX --> ER[Entity resolution]
+    ER --> TM[Temporal state and memory]
+    TM --> IN[Insights, attention, impact]
+    IN --> EV[Cited evidence]
+
+    style EX fill:#f6f1e7,stroke:#8a8172
+    style ER fill:#f6f1e7,stroke:#8a8172
+    style TM fill:#f6f1e7,stroke:#8a8172
+    style IN fill:#f6f1e7,stroke:#8a8172
+```
+
+Derived views (changes, memory, insights, attention, relationships, the semantic
+index) are rebuildable from source state. Losing them never loses data.
+Tenant isolation is enforced at the repository boundary: every read and write
+carries the organisation scope, and background jobs derive theirs from the
+durable job row — never from request state.
+
 ## What ThreadLine does
 
-| Capability | Purpose |
+| Capability | How |
 |---|---|
-| Meeting intelligence | Ingest meetings and recover structured, evidence-backed facts. |
-| Information extraction | Deterministically extract issues, tasks, decisions and risks, with supporting evidence. |
-| Entity resolution | Resolve mentions to canonical entities via candidates, scoring and a conservative decision. |
-| Organisational memory | Maintain durable, tenant-scoped memory of how entities changed over time. |
-| Change intelligence | Detect changes, their impact ja, and cross-entity risk without fabricating dependencies. |
-| Attention & impact | Prioritise what needs attention now and explain why, from durable evidence. |
-| Dependency intelligence | Infer co-occurrence relationships and cross-entity risk propagation deterministically. |
-| Semantic retrieval | Durable, tenant-scoped semantic index over resolved evidence. |
-| Natural-language query | Ask questions in plain language; answers are grounded in cited evidence. |
-| Proactive intelligence | Recurring scans surface newly relevant, deterministic signals as they emerge. |
-| Evidence & actions | Every insight links back to evidence and recommends concrete next actions. |
+| Meeting intelligence | Ingest meetings, recover structured evidence-backed facts |
+| Information extraction | Deterministic extraction of issues, tasks, decisions, risks |
+| Entity resolution | Candidates, scoring, and a conservative resolution decision |
+| Organisational memory | Durable, tenant-scoped history of how entities changed |
+| Change intelligence | State transitions, impact, and cross-entity risk — no fabricated links |
+| Attention | Prioritised signals explained by their evidence |
+| Semantic retrieval | Tenant-scoped semantic index over resolved evidence |
+| Natural-language query | Grounded answers with citations; abstains when evidence is thin |
+| Proactive intelligence | Opt-in scheduled re-scans surfacing newly relevant signals |
+| Evidence and actions | Every insight links to sources and recommends next actions |
 
-"Ask ThreadLine" is the grounding boundary: a question becomes a retrieval plan, evidence is scored and cited, and the answer is built only on what can be verified. When evidence is insufficient, ThreadLine says so instead of guessing.
-
-## Ask ThreadLine
+Ask ThreadLine is the grounding boundary — retrieval, scoring, cited answer:
 
 ```mermaid
 flowchart LR
@@ -49,67 +156,17 @@ flowchart LR
     A --> C[Cited evidence]
 ```
 
-## Proactive Intelligence
-
-ThreadLine's durable worker can periodically re-evaluate organisation state and surface newly relevant deterministic signals. This is a scheduled re-scan of existing evidence, not real-time monitoring or push notifications.
-
-```mermaid
-flowchart LR
-    S[Organisation state] --> P[Periodic scan job]
-    P --> Sig[Signals]
-    Sig --> N[Newly relevant signals]
-```
-
-Proactive intelligence is opt-in and off by default (`PROACTIVE_INTELLIGENCE_ENABLED=false`). When enabled, the worker schedules one durable scan job per organisation per interval, and each scan reports only genuinely new, deterministic signals — it never fabricates a discovery.
-
-## Architecture
-
-ThreadLine is a **modular monolith** with a **process-local durable worker** and **durable SQLite** as the source of truth. There is no separate message broker, no external queue, no distributed worker fleet, and no graph database.
-
-```mermaid
-flowchart TB
-    U[User] --> FE[React + TypeScript]
-    FE --> API[FastAPI]
-    API --> S[Domain & Intelligence Services]
-    S --> R[Tenant-Scoped Repositories]
-    R --> DB[(SQLite)]
-
-    WORK[Process-Local Worker] --> S
-    J[Background Jobs] --> WORK
-    SEM[Semantic Index] --> API
-```
-
-Domain state, derived intelligence, semantic retrieval evidence, and durable jobs all live in one process boundary. The worker derives its organisation scope from the durable job it executes, never from request state, so tenancy is preserved as work moves off the request path.
-
-### How intelligence is derived, not invented
-
-- **Durable source first.** SQLite is the durable source of organisational state — meetings, entities, mentions and background jobs.
-- **Derived, rebuildable views.** Changes, memory, insights, attention, relationships, impacts and the semantic index are computed deterministically from source state. Losing them never loses source data; they rebuild from it.
-- **Evidence-backed.** Every insight and every natural-language answer links to the evidence that supports it, and every answer carries citations back to the transcript.
-- **Tenancy at the boundary.** Repositories enforce organisation scope on every read and write; tenant isolation is structural, not a route-level convention.
-- **Deterministic and read-only intelligence.** The intelligence services never mutate entities or fabricate facts; they compute from verified state and abstain when evidence is ambiguous.
-
-## Security & tenancy
-
-- **Authenticated sessions** — server-side opaque sessions with hashed tokens and expiry; no default or hardcoded credentials.
-- **Organisation-scoped access** — members select their organisation via header, and membership is checked against real organisation state, never trusted blindly.
-- **Tenant isolation at the repository boundary** — every repository operation carries the organisation scope; objects outside that scope read as `404`, not as a cross-tenant existence oracle.
-- **Role-aware permissions** — central role policy (`AUTH_ROLE_PERMISSIONS`) distinguishes `OWNER`, `ADMIN` and `MEMBER`.
-- **Tenant-scoped semantic retrieval** — vector search and the semantic index are scoped to the requesting organisation.
-- **Durable job tenancy** — background jobs carry and derive their organisation scope from the durable job row, never from request state.
-- **Login throttling** — repeated failed logins are rate-limited to resist brute force and credential stuffing.
-- **Query rate limiting** — expensive natural-language query endpoints are rate-limited per user on a sliding window, returning `429` with a `Retry-After` header.
-
 ## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Backend | Python 3.12, FastAPI, Pydantic, SQLite |
-| Provider abstraction | Deterministic fake + OpenAI extraction; fake + OpenAI embeddings |
-| Background | Process-local durable worker over background jobs |
-| Frontend | React 19, TypeScript, Vite, TanStack Query |
-| Testing | Pytest (backend), Vitest (frontend), Playwright (E2E), ruff (lint) |
-| CI | GitHub Actions (`CI` workflow) |
+| Backend | Python 3.12+, FastAPI, Pydantic 2, Uvicorn |
+| Providers | Extraction and embeddings behind interfaces (deterministic fake or OpenAI) |
+| Storage | SQLite — source state, semantic index, and durable jobs |
+| Worker | Process-local durable executor over background jobs |
+| Frontend | React 19, TypeScript 6, Vite, TanStack Query, React Router |
+| Testing | Pytest, Vitest, Playwright, Ruff |
+| CI | GitHub Actions ([ci.yml](.github/workflows/ci.yml)) |
 
 Only tools actually in the repository are listed.
 
@@ -117,75 +174,49 @@ Only tools actually in the repository are listed.
 
 ```text
 app/
-  api/                FastAPI route modules (meetings, entities, auth, orgs,
-                      query, intelligence, changes, jobs, attention)
-  core/               Configuration (pydantic-settings, .env)
-  models/             Internal domain models
-  persistence/        SQLite store + schema migrations
-  providers/          Provider abstractions (extraction, embeddings)
-  repositories/       Tenant-scoped data access
-  schemas/            API request/response schemas
-  services/           Domain services: extraction, resolution, temporal,
-                      memory, intelligence, attention, correlation,
-                      semantic indexing, natural-language query
-  api/query.py        Natural-language question + evidence retrieval
-  api/intelligence.py Proactive intelligence scan status
-  main.py             FastAPI app, router wiring, worker lifecycle
-
+  api/            FastAPI route modules (auth, orgs, meetings, entities,
+                  query, intelligence, changes, jobs, attention, portfolio)
+  core/           Configuration (pydantic-settings, .env)
+  models/         Internal domain models
+  schemas/        Stable public API schemas
+  services/       Domain logic: extraction, resolution, temporal, memory,
+                  intelligence, attention, semantic indexing, NL query
+  repositories/   Tenant-scoped data access
+  persistence/    SQLite store and schema migrations
+  providers/      Extraction and embedding provider abstractions
+  main.py         App wiring, router registration, worker lifecycle
 frontend/
-  src/features/       React feature modules (meetings, entities, intelligence,
-                      ask, actions, auth)
-  src/test/           Frontend tests
-  e2e/                Playwright end-to-end tests
-
-tests/                Backend test suite
-scripts/              Operational scripts
-DEPLOYMENT.md         Deployment, configuration and operations guide
+  src/features/   Feature modules (dashboard, meetings, entities,
+                  intelligence, ask, actions, auth, landing)
+  src/components/ Shared UI, layout, and feedback primitives
+  e2e/            Playwright end-to-end suite
+tests/            Backend pytest suite
+scripts/          Operational helpers
 ```
 
-## Getting started
+## Quick start
 
-### Prerequisites
-
-- Python 3.12+
-- Node.js 22+
-- `pip` and `npm`
-
-### 1. Create a virtual environment and install dependencies
+Prerequisites: Python 3.12+, Node.js 22+.
 
 ```bash
+# Backend
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
-
+# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn app.main:app --reload        # http://localhost:8000 (/docs for API reference)
+
+# Frontend (new terminal)
+cd frontend
+npm ci
+npm run dev                          # http://localhost:5173, proxies /api to :8000
 ```
 
-### 2. Configure the LLM provider (optional)
+No LLM key is needed: ThreadLine runs on deterministic fake providers out of
+the box (`EXTRACTION_PROVIDER=fake`). Set `EXTRACTION_PROVIDER=openai` with an
+`OPENAI_API_KEY` only for real extractions. See [.env.example](.env.example).
 
-Copy `.env.example` to `.env`. ThreadLine runs without any LLM key using its deterministic fake providers:
-
-```env
-EXTRACTION_PROVIDER=fake        # "fake" (no key) or "openai"
-NL_PROVIDER=fake                # "fake" or "openai"
-SEMANTIC_INDEX_BACKEND=in_memory
-```
-
-Set `EXTRACTION_PROVIDER=openai` and add `OPENAI_API_KEY` only when you want real extractions. Everything else works out of the box.
-
-### 3. Run the backend
-
-```bash
-uvicorn app.main:app --reload
-```
-
-The API is served at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
-
-### 4. Bootstrap the first organisation and owner
-
-While no users exist, the API is open for the first owner through `POST /api/v1/auth/bootstrap`. The moment the first owner exists, anonymous access ends permanently — ThreadLine has no default admin and no default password.
+Create the first organisation and owner while the server is userless (anonymous
+access ends permanently once an owner exists — there are no default credentials):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
@@ -194,55 +225,62 @@ curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
        "admin_email": "owner@acme.example", "password": "<your-strong-password>"}'
 ```
 
-Then log in, and call tenant-scoped endpoints with the bearer token, selecting your organisation via the `X-Organisation-ID` header.
-
-### 5. Run the frontend
-
-```bash
-cd frontend
-npm ci
-npm run dev          # proxies /api to the backend on :8000
-```
+Then log in and pass the bearer token with your organisation via the
+`X-Organisation-ID` header.
 
 ## Testing
 
 ```bash
-# Backend — no LLM key needed (extraction tests use a fake provider)
+# Backend (fake providers — no LLM key needed)
 python -m pytest -q
 
-# Frontend — typecheck, unit tests, production build
+# Frontend: typecheck, unit tests, production build
 cd frontend
 npx tsc --noEmit
 npm test
 npm run build
 
-# End-to-end (Playwright against the built frontend + real backend)
+# End-to-end (Playwright, real backend + production build)
 npm run test:e2e
 ```
 
 ## API overview
 
-All routes live under `/api/v1` and require authentication. A few highlights:
+All routes live under `/api/v1` and require authentication after bootstrap.
 
 | Method | Route | Purpose |
 |---|---|---|
-| POST | `/api/v1/auth/bootstrap` | Create the first organisation + owner while userless |
-| POST | `/api/v1/auth/login` / `logout` | Log in / end a session |
+| POST | `/api/v1/auth/bootstrap` | First organisation + owner (open only while userless) |
+| POST | `/api/v1/auth/login`, `/logout` | Session management |
 | POST | `/api/v1/meetings` | Ingest a meeting |
 | POST | `/api/v1/meetings/{id}/extract` | Extract structured facts |
 | POST | `/api/v1/entities` | Create a canonical entity |
-| GET | `/api/v1/entities/{id}/insights` | Entity insights, memory, change & attention |
+| GET | `/api/v1/entities/{id}/insights` | Insights, memory, change, attention |
 | POST | `/api/v1/entities/mentions` | Register a mention |
-| POST | `/api/v1/query` | Ask a natural-language question (grounded answers) |
-| POST | `/api/v1/query/evidence` | Retrieve cited evidence for a question |
+| POST | `/api/v1/query` | Grounded natural-language answer |
+| POST | `/api/v1/query/evidence` | Cited evidence for a question |
 | GET | `/api/v1/intelligence/scan-status` | Proactive scan status |
 | GET | `/api/v1/changes/summary` | Organisation change summary |
-| GET | `/api/v1/attention` | Attention & prioritisation |
+| GET | `/api/v1/attention` | Prioritised attention |
 | GET | `/api/v1/portfolio` | Portfolio intelligence |
 | GET | `/health` | Liveness |
 
+## Security and tenancy
+
+- Server-side opaque sessions, hashed tokens, no default credentials
+- Organisation scope on every repository operation; out-of-scope reads return 404
+- Role-aware permissions (`OWNER` / `ADMIN` / `MEMBER`) from a central policy
+- Tenant-scoped semantic retrieval and durable job execution
+- Login throttling and per-user sliding-window rate limits on query endpoints
+- No tokens, transcripts, or secrets in logs
+
 ## Documentation
 
-- [DEPLOYMENT.md](DEPLOYMENT.md) — deployment model, configuration, and operations
-- [.env.example](.env.example) — all configuration options
-- [.github/workflows/ci.yml](.github/workflows/ci.yml) — the CI workflow (backend, frontend, browser)
+- [DEPLOYMENT.md](DEPLOYMENT.md) — runtime model, configuration, operations
+- [.env.example](.env.example) — all environment options
+- [STAGE_35_FINAL_REPORT.md](STAGE_35_FINAL_REPORT.md) — latest landing-page work
+- [Interactive API docs](http://localhost:8000/docs) — served by the running backend
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Vivek Marri.
