@@ -8,6 +8,7 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 
@@ -551,3 +552,53 @@ def health_diagnostics(request: Request) -> dict:
             if job.status.value == "RUNNING" and job.lease_until and job.lease_until <= datetime.now(timezone.utc)
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Frontend static hosting (single-container deployments)
+# ---------------------------------------------------------------------------
+def _frontend_dist_dir() -> Path | None:
+    """Locate the built frontend bundle, if present.
+
+    The production image copies frontend/dist into the image; local
+    checkouts only have it after `npm run build`.  When absent (plain API
+    dev), the API serves API routes only and unknown paths stay 404.
+    """
+    candidate = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    if (candidate / "index.html").is_file():
+        return candidate
+    return None
+
+
+_FRONTEND_DIST = _frontend_dist_dir()
+
+# Static assets that may live at the bundle root (favicon, manifest, …).
+# Served directly; everything else falls through to the SPA shell below.
+_ROOT_STATIC_SUFFIXES = frozenset({".ico", ".svg", ".png", ".webmanifest", ".txt"})
+
+if _FRONTEND_DIST is not None:
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def _spa_fallback(full_path: str):
+        """Serve the SPA shell for frontend routes; keep API 404s JSON.
+
+        Registered last so every /api/*, /health, /docs and /redoc route
+        matches first.  Unknown API paths still return a JSON 404 — only
+        genuine frontend paths receive index.html.
+        """
+        from fastapi.responses import FileResponse, PlainTextResponse
+
+        if full_path.startswith(("api/", "health", "docs", "redoc", "openapi.json")):
+            return PlainTextResponse("Not Found", status_code=404)
+        if full_path:
+            target = (_FRONTEND_DIST / full_path).resolve()
+            try:
+                target.relative_to(_FRONTEND_DIST.resolve())
+            except ValueError:
+                return PlainTextResponse("Not Found", status_code=404)
+            if target.is_file() and target.suffix in _ROOT_STATIC_SUFFIXES:
+                return FileResponse(target)
+        return FileResponse(_FRONTEND_DIST / "index.html")
