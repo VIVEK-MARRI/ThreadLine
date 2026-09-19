@@ -12,6 +12,7 @@ import "./components/feedback/states.css";
 import "./components/layout/shell.css";
 import "./features/pages.css";
 import "./features/auth/auth.css";
+import "./features/landing/landing.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("ThreadLine: #root element is missing.");

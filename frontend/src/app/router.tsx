@@ -13,6 +13,10 @@ import { LoginPage } from "../features/auth/LoginPage";
 import { SetupPage } from "../features/auth/SetupPage";
 import { SelectOrganisationPage } from "../features/auth/SelectOrganisationPage";
 
+const LandingPage = lazy(() =>
+  import("../features/landing/LandingPage").then((m) => ({ default: m.LandingPage })),
+);
+
 /* Feature routes are lazy: the shell + auth code loads first, each section
  * loads on demand. Page shells are stable contracts for future stages. */
 const DashboardPage = lazy(() =>
@@ -95,7 +99,14 @@ export const appRoutes: RouteObject[] = [
       { path: "settings", element: <SettingsPage /> },
     ],
   },
-  { path: "/", element: <Navigate to="/app/dashboard" replace /> },
+  {
+    path: "/",
+    element: (
+      <Suspense fallback={<LoadingState title="Loading" />}>
+        <LandingPage />
+      </Suspense>
+    ),
+  },
   { path: "*", element: <Navigate to="/app/dashboard" replace /> },
 ];
 
@@ -108,6 +119,7 @@ export function createTestRouter(initialPath: string): ReturnType<typeof createM
 
 /** Route catalogue for tests: every path must resolve without errors. */
 export const ROUTE_PATHS = [
+  "/",
   "/login",
   "/setup",
   "/app",

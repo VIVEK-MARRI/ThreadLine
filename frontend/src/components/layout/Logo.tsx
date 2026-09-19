@@ -2,7 +2,7 @@
 
 export function Logo({ compact = false }: { compact?: boolean }): React.JSX.Element {
   return (
-    <span className={["tl-logo", compact ? "tl-logo-compact" : ""].join(" ")} aria-label="ThreadLine">
+    <span role="img" className={["tl-logo", compact ? "tl-logo-compact" : ""].join(" ")} aria-label="ThreadLine">
       <svg className="tl-logo-mark" viewBox="0 0 32 32" aria-hidden="true">
         <rect width="32" height="32" rx="7" fill="#1e3a5f" />
         <path d="M9 8h14M16 8v16" stroke="#f5f1e8" strokeWidth="2.6" strokeLinecap="round" />
