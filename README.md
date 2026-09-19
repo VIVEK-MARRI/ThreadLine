@@ -3,7 +3,6 @@
 [![CI](https://github.com/VIVEK-MARRI/ThreadLine/actions/workflows/ci.yml/badge.svg)](https://github.com/VIVEK-MARRI/ThreadLine/actions/workflows/ci.yml)
 [![Last commit](https://img.shields.io/github/last-commit/VIVEK-MARRI/ThreadLine.svg)](https://github.com/VIVEK-MARRI/ThreadLine/commits/main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Live demo](https://img.shields.io/badge/demo-live-success.svg)](https://threadline-7vzq.onrender.com/)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](app/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-2.x-009688.svg)](app/main.py)
@@ -24,9 +23,11 @@ extracted deterministically from evidence, every change is derived from verified
 state transitions, and every answer points back to the meetings that support it.
 When evidence is insufficient, ThreadLine abstains instead of guessing.
 
-**Live demo:** [https://threadline-7vzq.onrender.com/](https://threadline-7vzq.onrender.com/)
-— hosted on a free tier, so the first load wakes the service (~50 s) and data
-resets on restart. For a permanent deployment, see [DEPLOYMENT.md](DEPLOYMENT.md).
+<p align="center">
+  <a href="https://threadline-7vzq.onrender.com/"><img src="https://img.shields.io/badge/TRY_THE_LIVE_DEMO-ThreadLine-success?style=for-the-badge" alt="Try the live ThreadLine demo"></a>
+</p>
+
+<p align="center"><em>Hosted on a free tier — first load wakes the service (~50&nbsp;s) and data resets on restart. For permanent hosting, see <a href="DEPLOYMENT.md">DEPLOYMENT.md</a>.</em></p>
 
 ## Follow the thread
 
